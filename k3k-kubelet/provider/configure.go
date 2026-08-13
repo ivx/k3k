@@ -30,6 +30,11 @@ func ConfigureNode(logger logr.Logger, node *corev1.Node, hostname string, servi
 		node.Annotations = hostNode.GetAnnotations()
 		node.Finalizers = hostNode.GetFinalizers()
 		node.Status.DaemonEndpoints.KubeletEndpoint.Port = int32(servicePort)
+		// The virtual cluster runs its own Kubernetes version, which may
+		// differ from the host's. Keep reporting the virtual cluster's
+		// version so version-gated consumers (operators, kubectl checks)
+		// don't act on the host version.
+		node.Status.NodeInfo.KubeletVersion = version
 	} else {
 		node.Status.Conditions = nodeConditions()
 		node.Status.DaemonEndpoints.KubeletEndpoint.Port = int32(servicePort)

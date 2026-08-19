@@ -1,0 +1,30 @@
+# Exact reproduction of the NetworkPolicy the v1.2.0-rc2 policy controller
+# generates for a VirtualClusterPolicy on this cluster (FindPodCIDRs returns
+# the node.Spec.PodCIDRs — on multi-pool cilium these are the PHANTOM ranges).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rc2-sim
+  namespace: vc4
+spec:
+  podSelector:
+    matchExpressions:
+      - key: k3k.io/clusterName
+        operator: Exists
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - {}
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["172.31.0.0/24", "172.31.1.0/24", "172.31.2.0/24"]
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vc4
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns

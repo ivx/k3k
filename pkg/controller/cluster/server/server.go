@@ -223,14 +223,22 @@ func (s *Server) podSpec(ctx context.Context, image, name string, persistent boo
 		)
 	}
 
-	// Adding readiness probes to statefulset
+	// Adding readiness probes to statefulset.
+	// /readyz includes the apiserver's etcd health checks; a bare TCP
+	// check stays green while raft has no quorum (the listener accepts
+	// connections and every handler times out), so ordered StatefulSet
+	// rolls proceeded into a quorum-less cluster. /readyz is reachable
+	// unauthenticated through the default system:public-info-viewer
+	// binding.
 	podSpec.Containers[0].ReadinessProbe = &corev1.Probe{
 		InitialDelaySeconds: 60,
 		FailureThreshold:    5,
 		TimeoutSeconds:      10,
 		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{
-				Port: intstr.FromInt(6443),
+			HTTPGet: &corev1.HTTPGetAction{
+				Path:   "/readyz",
+				Port:   intstr.FromInt(6443),
+				Scheme: corev1.URISchemeHTTPS,
 			},
 		},
 	}

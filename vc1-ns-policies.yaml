@@ -1,0 +1,69 @@
+# NS-wide default-deny for a virtual-cluster namespace (vc1), replacing the
+# label-scoped vc-workload-baseline. endpointSelector {} = every pod in the ns,
+# plumbing included — pods can no longer drop out of policy by losing labels.
+# Cilium implicitly allows local-host ingress (kubelet probes) for selected pods.
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vc-baseline
+  namespace: vc1
+spec:
+  description: "Virtual-cluster namespace baseline: default-deny, allow intra-namespace."
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - {}
+  egress:
+    - toEndpoints:
+        - {}
+---
+# Plumbing (k3s server + k3k-kubelet, both labeled cluster=<name>):
+# kubelet needs the HOST apiserver (pod lifecycle on the host side) and both
+# use host coredns (dnsPolicy ClusterFirst on the host cluster). Controller
+# in k3k-system reaches the server for provisioning/bootstrap.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vc-plumbing
+  namespace: vc1
+spec:
+  description: "Virtual-cluster plumbing: host apiserver + host DNS egress, controller ingress."
+  endpointSelector:
+    matchLabels:
+      cluster: vc1
+  egress:
+    - toEntities:
+        - kube-apiserver
+        - host
+        - remote-node
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: k3k-system
+---
+# Rancher-import jobs fetch the registration manifest from the mgmt Rancher.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vc-import-egress
+  namespace: vc1
+spec:
+  description: "Virtual-cluster import jobs: world egress for the registration manifest."
+  endpointSelector:
+    matchExpressions:
+      - key: job-name
+        operator: Exists
+  egress:
+    - toEntities:
+        - world

@@ -1,0 +1,31 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","metadata":{"annotations":{},"name":"vc-workload-baseline","namespace":"vc1"},"spec":{"description":"Virtual-cluster workload baseline: deny-by-default, allow intra-namespace (virtual apiserver, virtual coredns, pod-to-pod).","egress":[{"toEndpoints":[{}]}],"endpointSelector":{"matchExpressions":[{"key":"k3k.io/clusterName","operator":"Exists"}]},"ingress":[{"fromEndpoints":[{}]}]}}
+  creationTimestamp: "2026-07-28T13:49:14Z"
+  generation: 1
+  name: vc-workload-baseline
+  namespace: vc1
+  resourceVersion: "678398"
+  uid: 43ba2c54-416b-4586-9b7d-6c3a368457e4
+spec:
+  description: 'Virtual-cluster workload baseline: deny-by-default, allow intra-namespace
+    (virtual apiserver, virtual coredns, pod-to-pod).'
+  egress:
+  - toEndpoints:
+    - {}
+  endpointSelector:
+    matchExpressions:
+    - key: k3k.io/clusterName
+      operator: Exists
+  ingress:
+  - fromEndpoints:
+    - {}
+status:
+  conditions:
+  - lastTransitionTime: "2026-07-28T13:49:14Z"
+    message: Policy validation succeeded
+    status: "True"
+    type: Valid

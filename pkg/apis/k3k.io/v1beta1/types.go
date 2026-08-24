@@ -5,6 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // +genclient
@@ -315,6 +316,62 @@ type SyncConfig struct {
 	// +kubebuilder:default={"enabled": false}
 	// +optional
 	StorageClasses StorageClassSyncConfig `json:"storageClasses"`
+	// CustomResources configures syncing of arbitrary custom resources from
+	// the virtual cluster to the host: new resource types are configuration,
+	// not code. Each entry creates a syncer for one GroupVersionKind.
+	//
+	// +optional
+	CustomResources []CustomResourceSyncConfig `json:"customResources,omitempty"`
+}
+
+// CustomResourceSyncConfig configures the generic down-sync of one custom
+// resource type from the virtual cluster to the host cluster. The host
+// cluster must have the CRD and its operator; the virtual cluster needs the
+// CRD definition to accept the objects.
+type CustomResourceSyncConfig struct {
+	// APIVersion of the resource to sync (for example kubevirt.io/v1).
+	APIVersion string `json:"apiVersion"`
+
+	// Kind of the resource to sync (for example VirtualMachine).
+	Kind string `json:"kind"`
+
+	// Enabled is an on/off switch for syncing this resource type.
+	//
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// SyncStatus copies the host object's status subresource back to the
+	// virtual cluster object.
+	//
+	// +optional
+	SyncStatus bool `json:"syncStatus,omitempty"`
+
+	// Patches are JSON-patch-style operations (add/replace) applied to the
+	// object on the way down (virtual -> host). Values support substitution
+	// variables: $(VC_DNS) the virtual cluster's kube-dns host service
+	// ClusterIP, $(VC_NAME) the virtual cluster name, $(HOST_NS) the host
+	// namespace of the virtual cluster.
+	//
+	// +optional
+	Patches []CustomResourcePatch `json:"patches,omitempty"`
+}
+
+// CustomResourcePatch is one JSON-patch-style operation.
+type CustomResourcePatch struct {
+	// Op is the operation: add or replace.
+	//
+	// +kubebuilder:validation:Enum=add;replace
+	Op string `json:"op"`
+
+	// Path is a JSON-pointer path into the object (for example
+	// /spec/template/spec/dnsPolicy).
+	Path string `json:"path"`
+
+	// Value is the value to set, as arbitrary JSON (object, array or scalar).
+	//
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Value *runtime.RawExtension `json:"value,omitempty"`
 }
 
 // SecretSyncConfig specifies the sync options for Secrets.

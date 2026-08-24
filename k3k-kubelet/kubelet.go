@@ -344,6 +344,12 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 		return fmt.Errorf("failed to add pdb syncer controller: %w", err)
 	}
 
+	logger.Info("adding custom resource syncer controllers")
+
+	if err := syncer.AddCustomResourceSyncers(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+		return fmt.Errorf("failed to add custom resource syncer controllers: %w", err)
+	}
+
 	logger.Info("adding priorityclass controller")
 
 	if err := syncer.AddPriorityClassSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {

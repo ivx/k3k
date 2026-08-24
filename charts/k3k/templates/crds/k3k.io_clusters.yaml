@@ -3000,6 +3000,66 @@ spec:
                     required:
                     - enabled
                     type: object
+                  customResources:
+                    description: |-
+                      CustomResources configures syncing of arbitrary custom resources from
+                      the virtual cluster to the host: new resource types are configuration,
+                      not code. Each entry creates a syncer for one GroupVersionKind.
+                    items:
+                      description: |-
+                        CustomResourceSyncConfig configures the generic down-sync of one custom
+                        resource type from the virtual cluster to the host cluster. The host
+                        cluster must have the CRD and its operator; the virtual cluster needs the
+                        CRD definition to accept the objects.
+                      properties:
+                        apiVersion:
+                          description: APIVersion of the resource to sync (for example kubevirt.io/v1).
+                          type: string
+                        enabled:
+                          description: Enabled is an on/off switch for syncing this resource type.
+                          type: boolean
+                        kind:
+                          description: Kind of the resource to sync (for example VirtualMachine).
+                          type: string
+                        patches:
+                          description: |-
+                            Patches are JSON-patch-style operations (add/replace) applied to the
+                            object on the way down (virtual -> host). Values support substitution
+                            variables: $(VC_DNS) the virtual cluster's kube-dns host service
+                            ClusterIP, $(VC_NAME) the virtual cluster name, $(HOST_NS) the host
+                            namespace of the virtual cluster.
+                          items:
+                            description: CustomResourcePatch is one JSON-patch-style operation.
+                            properties:
+                              op:
+                                description: 'Op is the operation: add or replace.'
+                                enum:
+                                - add
+                                - replace
+                                type: string
+                              path:
+                                description: |-
+                                  Path is a JSON-pointer path into the object (for example
+                                  /spec/template/spec/dnsPolicy).
+                                type: string
+                              value:
+                                description: Value is the value to set, as arbitrary JSON (object, array or scalar).
+                                x-kubernetes-preserve-unknown-fields: true
+                            required:
+                            - op
+                            - path
+                            type: object
+                          type: array
+                        syncStatus:
+                          description: |-
+                            SyncStatus copies the host object's status subresource back to the
+                            virtual cluster object.
+                          type: boolean
+                      required:
+                      - apiVersion
+                      - kind
+                      type: object
+                    type: array
                   ingresses:
                     default:
                       enabled: false
@@ -5530,6 +5590,66 @@ spec:
                         required:
                         - enabled
                         type: object
+                      customResources:
+                        description: |-
+                          CustomResources configures syncing of arbitrary custom resources from
+                          the virtual cluster to the host: new resource types are configuration,
+                          not code. Each entry creates a syncer for one GroupVersionKind.
+                        items:
+                          description: |-
+                            CustomResourceSyncConfig configures the generic down-sync of one custom
+                            resource type from the virtual cluster to the host cluster. The host
+                            cluster must have the CRD and its operator; the virtual cluster needs the
+                            CRD definition to accept the objects.
+                          properties:
+                            apiVersion:
+                              description: APIVersion of the resource to sync (for example kubevirt.io/v1).
+                              type: string
+                            enabled:
+                              description: Enabled is an on/off switch for syncing this resource type.
+                              type: boolean
+                            kind:
+                              description: Kind of the resource to sync (for example VirtualMachine).
+                              type: string
+                            patches:
+                              description: |-
+                                Patches are JSON-patch-style operations (add/replace) applied to the
+                                object on the way down (virtual -> host). Values support substitution
+                                variables: $(VC_DNS) the virtual cluster's kube-dns host service
+                                ClusterIP, $(VC_NAME) the virtual cluster name, $(HOST_NS) the host
+                                namespace of the virtual cluster.
+                              items:
+                                description: CustomResourcePatch is one JSON-patch-style operation.
+                                properties:
+                                  op:
+                                    description: 'Op is the operation: add or replace.'
+                                    enum:
+                                    - add
+                                    - replace
+                                    type: string
+                                  path:
+                                    description: |-
+                                      Path is a JSON-pointer path into the object (for example
+                                      /spec/template/spec/dnsPolicy).
+                                    type: string
+                                  value:
+                                    description: Value is the value to set, as arbitrary JSON (object, array or scalar).
+                                    x-kubernetes-preserve-unknown-fields: true
+                                required:
+                                - op
+                                - path
+                                type: object
+                              type: array
+                            syncStatus:
+                              description: |-
+                                SyncStatus copies the host object's status subresource back to the
+                                virtual cluster object.
+                              type: boolean
+                          required:
+                          - apiVersion
+                          - kind
+                          type: object
+                        type: array
                       ingresses:
                         default:
                           enabled: false

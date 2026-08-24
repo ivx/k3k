@@ -1,6 +1,10 @@
 package agent
 
 import (
+	"strings"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"context"
 	"errors"
 	"fmt"
@@ -440,6 +444,24 @@ func (s *SharedAgent) role(ctx context.Context) error {
 				Verbs:     []string{"*"},
 			},
 		},
+	}
+
+	// Custom-resource syncs need host-side access to the synced types. The
+	// resource name is derived as lower(kind)+"s", matching the standard
+	// CRD plural of the supported types.
+	if s.cluster.Spec.Sync != nil {
+		for _, cfg := range s.cluster.Spec.Sync.CustomResources {
+			gv, err := schema.ParseGroupVersion(cfg.APIVersion)
+			if err != nil {
+				continue
+			}
+
+			role.Rules = append(role.Rules, rbacv1.PolicyRule{
+				APIGroups: []string{gv.Group},
+				Resources: []string{strings.ToLower(cfg.Kind) + "s"},
+				Verbs:     []string{"*"},
+			})
+		}
 	}
 
 	return s.ensureObject(ctx, role)

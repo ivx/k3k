@@ -183,6 +183,38 @@ The `clusterDNS` field specifies the IP address for the CoreDNS service. It need
 
 The `serverArgs` field allows you to specify additional arguments to be passed to the K3s server pods.
 
+### `sync.customResources`
+
+In shared mode the host cluster runs the operators; a virtual cluster only needs the API surface. `sync.customResources` syncs objects of an arbitrary kind from the virtual cluster down to the host namespace of the virtual cluster, with the same name translation as the built-in syncers:
+
+```yaml
+spec:
+  sync:
+    customResources:
+      - apiVersion: cilium.io/v2
+        kind: CiliumNetworkPolicy
+        enabled: true
+        selectors:
+          - /spec/endpointSelector
+          - /spec/ingress/*/fromEndpoints/*
+          - /spec/egress/*/toEndpoints/*
+        rejects:
+          - path: /spec/egress/*/toEntities
+            allow: [world]
+          - path: /spec/egress/*/toCIDR
+          - path: /spec/nodeSelector
+```
+
+- **CRDs come from the host.** Before the syncer starts, the kubelet copies the CRD that serves each enabled entry from the host into the virtual cluster (conversion webhooks are replaced by `None`) and keeps it in step with the host afterwards. Built-in kinds need no CRD. The kubelet needs a running kubelet restart to pick up a *new* entry; `enabled` is honoured live.
+- **`patches`** are `add`/`replace` operations at JSON-pointer paths, applied on the way down. Values may use `$(VC_NAME)`, `$(HOST_NS)`, `$(VC_DNS)` (the host ClusterIP of the virtual cluster's kube-dns) and `$(VC_NAMESPACE)`.
+- **`selectors`** lists paths (`*` matches every list item or map value) to `LabelSelector` objects. Each is scoped to the virtual cluster: `k3k.io/clusterName` is forced, a namespace reference (`io.kubernetes.pod.namespace`, with or without a Cilium source prefix) is rewritten to `k3k.io/namespaceName`, and a selector without namespace reference is pinned to the object's own namespace. A missing selector is created and pinned. Selecting namespaces by their labels cannot be translated and rejects the object.
+- **`rejects`** lists fields a synced object may not set, optionally with allowed list values. A rejected object gets a `Warning` event (`SyncRejected`) in the virtual cluster and its host copy is removed. Rejection is not retried.
+- **`selector`** restricts the sync to virtual objects with these labels.
+- **`syncStatus`** copies the host object's status back to the virtual object.
+- **`perNamespace`** lists complete objects of the entry's kind that are created on the host once for every namespace of the virtual cluster and removed with it, for example a per-namespace baseline network policy. Templates support the substitution variables above; `$(VC_NAMESPACE)` is the namespace the object is rendered for. Templates are platform input: `selectors` and `rejects` do not apply to them.
+
+`sync.podDisruptionBudgets` is an alias for an entry `policy/v1 PodDisruptionBudget` with `selectors: [/spec/selector]`: a virtual PDB becomes a host PDB scoped to the pods of its virtual cluster and namespace, so host drains and evictions respect it.
+
 ## Using the cli
 
 You can check the [k3kcli documentation](./cli/k3kcli.md) for the full specs.

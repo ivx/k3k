@@ -354,6 +354,42 @@ type CustomResourceSyncConfig struct {
 	//
 	// +optional
 	Patches []CustomResourcePatch `json:"patches,omitempty"`
+
+	// Selectors lists JSON-pointer paths to LabelSelector-shaped objects
+	// (matchLabels/matchExpressions) inside the resource, for example
+	// /spec/selector or /spec/ingress/*/fromEndpoints/*. A "*" segment
+	// matches every list item or map value. On the way down each selector
+	// is scoped to the virtual cluster: k3k.io/clusterName is forced, a
+	// namespace reference (io.kubernetes.pod.namespace, with or without a
+	// Cilium source prefix) is rewritten to k3k.io/namespaceName, and a
+	// selector without namespace reference is pinned to the object's own
+	// namespace. Selectors on namespace labels
+	// (io.kubernetes.pod.namespace.labels.*) cannot be translated and
+	// reject the object.
+	//
+	// +optional
+	Selectors []string `json:"selectors,omitempty"`
+
+	// Rejects lists fields a synced object may not set. Any non-empty
+	// value at a listed path blocks the sync, unless the value is a list
+	// whose items are all in Allow. A rejected object gets a Warning event
+	// in the virtual cluster and its host copy is removed.
+	//
+	// +optional
+	Rejects []CustomResourceReject `json:"rejects,omitempty"`
+}
+
+// CustomResourceReject names a field (JSON-pointer path, "*" wildcards) that
+// must stay empty on synced objects, with an optional list of allowed values.
+type CustomResourceReject struct {
+	// Path is a JSON-pointer path into the object, for example
+	// /spec/egress/*/toEntities.
+	Path string `json:"path"`
+
+	// Allow lists values that may appear in a list at Path.
+	//
+	// +optional
+	Allow []string `json:"allow,omitempty"`
 }
 
 // CustomResourcePatch is one JSON-patch-style operation.

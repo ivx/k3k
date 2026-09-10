@@ -360,7 +360,7 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 
 	logger.Info("adding custom resource syncer controllers")
 
-	if err := syncer.AddCustomResourceSyncers(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+	if err := syncer.AddCustomResourceSyncers(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
 		return fmt.Errorf("failed to add custom resource syncer controllers: %w", err)
 	}
 

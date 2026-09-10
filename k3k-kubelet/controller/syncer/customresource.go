@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -42,7 +44,8 @@ const (
 // the host object's status flows back to the virtual object.
 type CustomResourceReconciler struct {
 	*SyncerContext
-	GVK schema.GroupVersionKind
+	GVK      schema.GroupVersionKind
+	Recorder record.EventRecorder
 }
 
 // AddCustomResourceSyncers registers one syncer controller per enabled
@@ -52,7 +55,7 @@ type CustomResourceReconciler struct {
 // still processed for cleanup. Because controller-runtime informers start
 // with a full LIST, pre-existing virtual objects are replayed at startup —
 // enabling a type and restarting the kubelet backfills everything.
-func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string) error {
+func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, recorder record.EventRecorder) error {
 	var cluster v1beta1.Cluster
 
 	// The manager caches have not started yet — use the direct reader.
@@ -69,7 +72,7 @@ func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Mana
 			continue
 		}
 
-		if err := addCustomResourceSyncer(virtMgr, hostMgr, clusterName, clusterNamespace, cfg); err != nil {
+		if err := addCustomResourceSyncer(virtMgr, hostMgr, clusterName, clusterNamespace, cfg, recorder); err != nil {
 			return fmt.Errorf("customresource syncer for %s/%s: %w", cfg.APIVersion, cfg.Kind, err)
 		}
 	}
@@ -77,7 +80,7 @@ func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Mana
 	return nil
 }
 
-func addCustomResourceSyncer(virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, cfg v1beta1.CustomResourceSyncConfig) error {
+func addCustomResourceSyncer(virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, cfg v1beta1.CustomResourceSyncConfig, recorder record.EventRecorder) error {
 	gv, err := schema.ParseGroupVersion(cfg.APIVersion)
 	if err != nil {
 		return err
@@ -96,7 +99,8 @@ func addCustomResourceSyncer(virtMgr, hostMgr manager.Manager, clusterName, clus
 				ClusterNamespace: clusterNamespace,
 			},
 		},
-		GVK: gvk,
+		GVK:      gvk,
+		Recorder: recorder,
 	}
 
 	virtObj := &unstructured.Unstructured{}
@@ -186,6 +190,10 @@ func (r *CustomResourceReconciler) Reconcile(ctx context.Context, req reconcile.
 
 	hostObj, err := r.translated(ctx, virtObj, cfg)
 	if err != nil {
+		if errors.Is(err, ErrRejected) && virtObj.GetDeletionTimestamp().IsZero() {
+			return reconcile.Result{}, r.reject(ctx, virtObj, err)
+		}
+
 		return reconcile.Result{}, err
 	}
 
@@ -266,16 +274,35 @@ func (r *CustomResourceReconciler) translated(ctx context.Context, virtObj *unst
 	hostObj.SetOwnerReferences(nil)
 	delete(hostObj.Object, "status")
 
-	if len(cfg.Patches) == 0 {
-		return hostObj, nil
-	}
-
-	vars, err := r.substitutions(ctx, virtObj.GetNamespace())
-	if err != nil {
+	if err := r.applyPatches(ctx, hostObj, virtObj.GetNamespace(), cfg.Patches); err != nil {
 		return nil, err
 	}
 
-	for _, p := range cfg.Patches {
+	// Scope selectors to this virtual cluster and refuse fields that would
+	// widen what the object can reach. Both run on the translated object so
+	// that they also cover values introduced by patches.
+	if err := scopeSelectors(hostObj.Object, cfg.Selectors, r.ClusterName, virtObj.GetNamespace()); err != nil {
+		return nil, err
+	}
+
+	if err := checkRejects(hostObj.Object, cfg.Rejects); err != nil {
+		return nil, err
+	}
+
+	return hostObj, nil
+}
+
+func (r *CustomResourceReconciler) applyPatches(ctx context.Context, hostObj *unstructured.Unstructured, virtNamespace string, patches []v1beta1.CustomResourcePatch) error {
+	if len(patches) == 0 {
+		return nil
+	}
+
+	vars, err := r.substitutions(ctx, virtNamespace)
+	if err != nil {
+		return err
+	}
+
+	for _, p := range patches {
 		var value any
 
 		if p.Value != nil {
@@ -285,16 +312,38 @@ func (r *CustomResourceReconciler) translated(ctx context.Context, virtObj *unst
 			}
 
 			if err := json.Unmarshal([]byte(raw), &value); err != nil {
-				return nil, fmt.Errorf("patch value for %s: %w", p.Path, err)
+				return fmt.Errorf("patch value for %s: %w", p.Path, err)
 			}
 		}
 
 		if err := applyPatch(hostObj.Object, p.Op, p.Path, value); err != nil {
-			return nil, fmt.Errorf("applying patch %s %s: %w", p.Op, p.Path, err)
+			return fmt.Errorf("applying patch %s %s: %w", p.Op, p.Path, err)
 		}
 	}
 
-	return hostObj, nil
+	return nil
+}
+
+// reject handles an object that must not reach the host: the virtual object
+// gets a Warning event with the reason, and a host copy from an earlier,
+// valid version is removed so that the stale version cannot stay in effect.
+// Not an error for the reconciler — retrying changes nothing.
+func (r *CustomResourceReconciler) reject(ctx context.Context, virtObj *unstructured.Unstructured, cause error) error {
+	log := ctrl.LoggerFrom(ctx)
+	log.Info("object rejected, not synced to the host", "name", virtObj.GetName(), "namespace", virtObj.GetNamespace(), "reason", cause.Error())
+
+	if r.Recorder != nil {
+		r.Recorder.Event(virtObj, corev1.EventTypeWarning, "SyncRejected", cause.Error())
+	}
+
+	hostObj := virtObj.DeepCopy()
+	r.Translator.TranslateTo(hostObj)
+
+	if err := r.HostClient.Delete(ctx, hostObj); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	return nil
 }
 
 func (r *CustomResourceReconciler) substitutions(ctx context.Context, virtNamespace string) (map[string]string, error) {

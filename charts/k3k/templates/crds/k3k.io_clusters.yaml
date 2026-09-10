@@ -3050,6 +3050,47 @@ spec:
                             - path
                             type: object
                           type: array
+                        rejects:
+                          description: |-
+                            Rejects lists fields a synced object may not set. Any non-empty
+                            value at a listed path blocks the sync, unless the value is a list
+                            whose items are all in Allow. A rejected object gets a Warning event
+                            in the virtual cluster and its host copy is removed.
+                          items:
+                            description: |-
+                              CustomResourceReject names a field (JSON-pointer path, "*" wildcards) that
+                              must stay empty on synced objects, with an optional list of allowed values.
+                            properties:
+                              allow:
+                                description: Allow lists values that may appear in a list at Path.
+                                items:
+                                  type: string
+                                type: array
+                              path:
+                                description: |-
+                                  Path is a JSON-pointer path into the object, for example
+                                  /spec/egress/*/toEntities.
+                                type: string
+                            required:
+                            - path
+                            type: object
+                          type: array
+                        selectors:
+                          description: |-
+                            Selectors lists JSON-pointer paths to LabelSelector-shaped objects
+                            (matchLabels/matchExpressions) inside the resource, for example
+                            /spec/selector or /spec/ingress/*/fromEndpoints/*. A "*" segment
+                            matches every list item or map value. On the way down each selector
+                            is scoped to the virtual cluster: k3k.io/clusterName is forced, a
+                            namespace reference (io.kubernetes.pod.namespace, with or without a
+                            Cilium source prefix) is rewritten to k3k.io/namespaceName, and a
+                            selector without namespace reference is pinned to the object's own
+                            namespace. Selectors on namespace labels
+                            (io.kubernetes.pod.namespace.labels.*) cannot be translated and
+                            reject the object.
+                          items:
+                            type: string
+                          type: array
                         syncStatus:
                           description: |-
                             SyncStatus copies the host object's status subresource back to the
@@ -5639,6 +5680,47 @@ spec:
                                 - op
                                 - path
                                 type: object
+                              type: array
+                            rejects:
+                              description: |-
+                                Rejects lists fields a synced object may not set. Any non-empty
+                                value at a listed path blocks the sync, unless the value is a list
+                                whose items are all in Allow. A rejected object gets a Warning event
+                                in the virtual cluster and its host copy is removed.
+                              items:
+                                description: |-
+                                  CustomResourceReject names a field (JSON-pointer path, "*" wildcards) that
+                                  must stay empty on synced objects, with an optional list of allowed values.
+                                properties:
+                                  allow:
+                                    description: Allow lists values that may appear in a list at Path.
+                                    items:
+                                      type: string
+                                    type: array
+                                  path:
+                                    description: |-
+                                      Path is a JSON-pointer path into the object, for example
+                                      /spec/egress/*/toEntities.
+                                    type: string
+                                required:
+                                - path
+                                type: object
+                              type: array
+                            selectors:
+                              description: |-
+                                Selectors lists JSON-pointer paths to LabelSelector-shaped objects
+                                (matchLabels/matchExpressions) inside the resource, for example
+                                /spec/selector or /spec/ingress/*/fromEndpoints/*. A "*" segment
+                                matches every list item or map value. On the way down each selector
+                                is scoped to the virtual cluster: k3k.io/clusterName is forced, a
+                                namespace reference (io.kubernetes.pod.namespace, with or without a
+                                Cilium source prefix) is rewritten to k3k.io/namespaceName, and a
+                                selector without namespace reference is pinned to the object's own
+                                namespace. Selectors on namespace labels
+                                (io.kubernetes.pod.namespace.labels.*) cannot be translated and
+                                reject the object.
+                              items:
+                                type: string
                               type: array
                             syncStatus:
                               description: |-

@@ -345,12 +345,6 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 		return fmt.Errorf("failed to add pvc syncer controller: %w", err)
 	}
 
-	logger.Info("adding pdb syncer controller")
-
-	if err := syncer.AddPodDisruptionBudgetSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
-		return fmt.Errorf("failed to add pdb syncer controller: %w", err)
-	}
-
 	// The CRDs behind sync.customResources entries come from the host: copy
 	// them into the virtual cluster before the syncers register their
 	// informers, then keep them in step with the host.
@@ -362,6 +356,10 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 
 	if err := syncer.AddCustomResourceSyncers(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
 		return fmt.Errorf("failed to add custom resource syncer controllers: %w", err)
+	}
+
+	if err := syncer.AddNamespaceTemplateSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+		return fmt.Errorf("failed to add namespace template syncer controller: %w", err)
 	}
 
 	logger.Info("adding priorityclass controller")

@@ -32,6 +32,14 @@ var namespaceLabelPrefixes = []string{
 // CustomResourceSyncConfig.Selectors for the rules.
 func scopeSelectors(root map[string]any, paths []string, clusterName, namespace string) error {
 	for _, path := range paths {
+		// A missing selector means "everything" for most kinds (a PDB
+		// without spec.selector, an empty endpointSelector) - on the host
+		// that would be every pod in the namespace, across tenants. Create
+		// it so that it gets scoped like an explicit empty selector.
+		if err := ensureSelectorNode(root, path); err != nil {
+			return fmt.Errorf("selector path %s: %w", path, err)
+		}
+
 		nodes, err := findNodes(root, path)
 		if err != nil {
 			return fmt.Errorf("selector path %s: %w", path, err)
@@ -45,6 +53,48 @@ func scopeSelectors(root map[string]any, paths []string, clusterName, namespace 
 
 			if err := scopeSelector(sel, clusterName, namespace); err != nil {
 				return fmt.Errorf("selector at %s: %w", path, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ensureSelectorNode creates an empty object at path below every existing
+// parent when the final segment is a fixed key that is absent. Wildcard final
+// segments (list items) are left alone: an absent list selects nothing.
+func ensureSelectorNode(root map[string]any, path string) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("path must start with /")
+	}
+
+	i := strings.LastIndex(path, "/")
+	last := path[i+1:]
+
+	if last == "*" || last == "" {
+		return nil
+	}
+
+	parentPath := path[:i]
+	if parentPath == "" {
+		parentPath = "/"
+	}
+
+	var parents []any
+
+	if parentPath == "/" {
+		parents = []any{root}
+	} else {
+		var err error
+		if parents, err = findNodes(root, parentPath); err != nil {
+			return err
+		}
+	}
+
+	for _, p := range parents {
+		if m, ok := p.(map[string]any); ok {
+			if _, exists := m[last]; !exists || m[last] == nil {
+				m[last] = map[string]any{}
 			}
 		}
 	}

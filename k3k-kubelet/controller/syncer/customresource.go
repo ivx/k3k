@@ -5,21 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -32,9 +36,10 @@ const (
 	crFinalizerName  = "customresource.k3k.io/finalizer"
 
 	// Substitution variables usable in patch values.
-	varVCDNS  = "$(VC_DNS)"
-	varVCName = "$(VC_NAME)"
-	varHostNS = "$(HOST_NS)"
+	varVCDNS       = "$(VC_DNS)"
+	varVCName      = "$(VC_NAME)"
+	varHostNS      = "$(HOST_NS)"
+	varVCNamespace = "$(VC_NAMESPACE)"
 )
 
 // CustomResourceReconciler generically syncs one custom resource type from
@@ -63,11 +68,7 @@ func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Mana
 		return fmt.Errorf("customresource syncer: reading cluster: %w", err)
 	}
 
-	if cluster.Spec.Sync == nil {
-		return nil
-	}
-
-	for _, cfg := range cluster.Spec.Sync.CustomResources {
+	for _, cfg := range CustomResourceEntries(&cluster) {
 		if !cfg.Enabled {
 			continue
 		}
@@ -78,6 +79,41 @@ func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Mana
 	}
 
 	return nil
+}
+
+// pdbEntry is the generic-syncer form of sync.podDisruptionBudgets: a PDB is
+// a LabelSelector-carrying object whose host copy must be scoped to the pods
+// of its virtual cluster and namespace - exactly what selectors do.
+func pdbEntry(cfg v1beta1.PodDisruptionBudgetSyncConfig) v1beta1.CustomResourceSyncConfig {
+	return v1beta1.CustomResourceSyncConfig{
+		APIVersion: "policy/v1",
+		Kind:       "PodDisruptionBudget",
+		Enabled:    cfg.Enabled,
+		Selector:   cfg.Selector,
+		Selectors:  []string{"/spec/selector"},
+	}
+}
+
+// CustomResourceEntries returns the effective sync.customResources entries of
+// a cluster: the configured ones plus the built-in alias for
+// sync.podDisruptionBudgets (unless an explicit PodDisruptionBudget entry
+// exists, which then wins).
+func CustomResourceEntries(cluster *v1beta1.Cluster) []v1beta1.CustomResourceSyncConfig {
+	if cluster.Spec.Sync == nil {
+		return nil
+	}
+
+	entries := slices.Clone(cluster.Spec.Sync.CustomResources)
+
+	explicitPDB := slices.ContainsFunc(entries, func(e v1beta1.CustomResourceSyncConfig) bool {
+		return e.APIVersion == "policy/v1" && e.Kind == "PodDisruptionBudget"
+	})
+
+	if !explicitPDB {
+		entries = append(entries, pdbEntry(cluster.Spec.Sync.PodDisruptionBudgets))
+	}
+
+	return entries
 }
 
 func addCustomResourceSyncer(virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, cfg v1beta1.CustomResourceSyncConfig, recorder record.EventRecorder) error {
@@ -113,7 +149,7 @@ func addCustomResourceSyncer(virtMgr, hostMgr manager.Manager, clusterName, clus
 
 	return ctrl.NewControllerManagedBy(virtMgr).
 		Named(name).
-		For(virtObj).
+		For(virtObj, builder.WithPredicates(predicate.NewPredicateFuncs(reconciler.filterResources))).
 		// Host-side changes (status updates by the operator) map back to the
 		// originating virtual object via the translation annotations.
 		WatchesRawSource(source.Kind(hostMgr.GetCache(), ctrlruntimeclient.Object(hostObj),
@@ -142,12 +178,10 @@ func (r *CustomResourceReconciler) mapHostToVirtual(ctx context.Context, obj ctr
 }
 
 func (r *CustomResourceReconciler) config(cluster *v1beta1.Cluster) *v1beta1.CustomResourceSyncConfig {
-	if cluster.Spec.Sync == nil {
-		return nil
-	}
+	entries := CustomResourceEntries(cluster)
 
-	for i := range cluster.Spec.Sync.CustomResources {
-		cfg := &cluster.Spec.Sync.CustomResources[i]
+	for i := range entries {
+		cfg := &entries[i]
 
 		gv, err := schema.ParseGroupVersion(cfg.APIVersion)
 		if err != nil {
@@ -160,6 +194,27 @@ func (r *CustomResourceReconciler) config(cluster *v1beta1.Cluster) *v1beta1.Cus
 	}
 
 	return nil
+}
+
+// filterResources applies the entry's label selector to the virtual objects.
+// Deletions always pass so that host copies of objects that stopped matching
+// (or of a disabled entry) are cleaned up.
+func (r *CustomResourceReconciler) filterResources(object ctrlruntimeclient.Object) bool {
+	if !object.GetDeletionTimestamp().IsZero() {
+		return true
+	}
+
+	var cluster v1beta1.Cluster
+	if err := r.HostClient.Get(context.Background(), types.NamespacedName{Name: r.ClusterName, Namespace: r.ClusterNamespace}, &cluster); err != nil {
+		return false
+	}
+
+	cfg := r.config(&cluster)
+	if cfg == nil || !cfg.Enabled {
+		return false
+	}
+
+	return labels.SelectorFromSet(cfg.Selector).Matches(labels.Set(object.GetLabels()))
 }
 
 func (r *CustomResourceReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -297,7 +352,7 @@ func (r *CustomResourceReconciler) applyPatches(ctx context.Context, hostObj *un
 		return nil
 	}
 
-	vars, err := r.substitutions(ctx, virtNamespace)
+	vars, err := substitutionVars(ctx, r.HostClient, r.ClusterName, r.ClusterNamespace, virtNamespace)
 	if err != nil {
 		return err
 	}
@@ -306,12 +361,7 @@ func (r *CustomResourceReconciler) applyPatches(ctx context.Context, hostObj *un
 		var value any
 
 		if p.Value != nil {
-			raw := string(p.Value.Raw)
-			for k, v := range vars {
-				raw = strings.ReplaceAll(raw, k, v)
-			}
-
-			if err := json.Unmarshal([]byte(raw), &value); err != nil {
+			if err := json.Unmarshal([]byte(substitute(string(p.Value.Raw), vars)), &value); err != nil {
 				return fmt.Errorf("patch value for %s: %w", p.Path, err)
 			}
 		}
@@ -346,27 +396,37 @@ func (r *CustomResourceReconciler) reject(ctx context.Context, virtObj *unstruct
 	return nil
 }
 
-func (r *CustomResourceReconciler) substitutions(ctx context.Context, virtNamespace string) (map[string]string, error) {
+// substitutionVars resolves the variables usable in patch values and
+// per-namespace templates.
+func substitutionVars(ctx context.Context, hostClient ctrlruntimeclient.Client, clusterName, clusterNamespace, virtNamespace string) (map[string]string, error) {
 	vars := map[string]string{
-		varVCName: r.ClusterName,
-		varHostNS: r.ClusterNamespace,
+		varVCName:      clusterName,
+		varHostNS:      clusterNamespace,
+		varVCNamespace: virtNamespace,
 	}
 
 	// The vc kube-dns ClusterIP is only known at sync time and changes on vc
-	// recreation — the reason DNS wiring must be dynamic (the VM-syncer's
+	// recreation - the reason DNS wiring must be dynamic (the VM-syncer's
 	// guest-DNS use case).
 	var svc corev1.Service
 
-	dnsName := fmt.Sprintf("k3k-%s-kube-dns", r.ClusterName)
-	if err := r.HostClient.Get(ctx, types.NamespacedName{Name: dnsName, Namespace: r.ClusterNamespace}, &svc); err == nil {
+	dnsName := fmt.Sprintf("k3k-%s-kube-dns", clusterName)
+	if err := hostClient.Get(ctx, types.NamespacedName{Name: dnsName, Namespace: clusterNamespace}, &svc); err == nil {
 		vars[varVCDNS] = svc.Spec.ClusterIP
 	} else if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
 
-	_ = virtNamespace // reserved for future per-namespace variables
-
 	return vars, nil
+}
+
+// substitute replaces every variable in raw.
+func substitute(raw string, vars map[string]string) string {
+	for k, v := range vars {
+		raw = strings.ReplaceAll(raw, k, v)
+	}
+
+	return raw
 }
 
 // applyPatch applies one add/replace operation at a JSON-pointer path on an

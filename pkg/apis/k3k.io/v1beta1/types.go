@@ -377,6 +377,34 @@ type CustomResourceSyncConfig struct {
 	//
 	// +optional
 	Rejects []CustomResourceReject `json:"rejects,omitempty"`
+
+	// Selector restricts syncing to virtual objects carrying these labels.
+	// Empty means all objects of the kind.
+	//
+	// +optional
+	Selector map[string]string `json:"selector,omitempty"`
+
+	// PerNamespace lists objects of this kind that are created on the host
+	// once for every namespace of the virtual cluster and removed with it -
+	// platform-owned defaults such as a per-namespace baseline network
+	// policy. Each template is a complete object of this kind; its
+	// metadata.namespace is the virtual namespace and its name and labels
+	// are translated like a synced object. Substitution variables:
+	// $(VC_NAME), $(HOST_NS), $(VC_DNS) and $(VC_NAMESPACE), the virtual
+	// namespace the object is created for. Templates are platform input:
+	// selectors and rejects do not apply to them.
+	//
+	// +optional
+	PerNamespace []CustomResourceTemplate `json:"perNamespace,omitempty"`
+}
+
+// CustomResourceTemplate is a complete object rendered per virtual namespace.
+type CustomResourceTemplate struct {
+	// Template is the object, as arbitrary JSON.
+	//
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Template runtime.RawExtension `json:"template"`
 }
 
 // CustomResourceReject names a field (JSON-pointer path, "*" wildcards) that

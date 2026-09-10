@@ -1,15 +1,13 @@
 package agent
 
 import (
-	"strings"
-
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"go.yaml.in/yaml/v4"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -447,8 +445,8 @@ func (s *SharedAgent) role(ctx context.Context) error {
 	}
 
 	// Custom-resource syncs need host-side access to the synced types. The
-	// resource name is derived as lower(kind)+"s", matching the standard
-	// CRD plural of the supported types.
+	// resource (plural) comes from the host's discovery; when the type is
+	// not installed yet, fall back to the naive lower(kind)+"s".
 	if s.cluster.Spec.Sync != nil {
 		for _, cfg := range s.cluster.Spec.Sync.CustomResources {
 			gv, err := schema.ParseGroupVersion(cfg.APIVersion)
@@ -458,7 +456,7 @@ func (s *SharedAgent) role(ctx context.Context) error {
 
 			role.Rules = append(role.Rules, rbacv1.PolicyRule{
 				APIGroups: []string{gv.Group},
-				Resources: []string{strings.ToLower(cfg.Kind) + "s"},
+				Resources: []string{s.resourceName(gv.WithKind(cfg.Kind))},
 				Verbs:     []string{"*"},
 			})
 		}
@@ -492,4 +490,18 @@ func (s *SharedAgent) roleBinding(ctx context.Context) error {
 	}
 
 	return s.ensureObject(ctx, roleBinding)
+}
+
+// resourceName returns the plural resource name of a kind as the host API
+// server reports it, or the naive lower(kind)+"s" when the kind is unknown.
+func (s *SharedAgent) resourceName(gvk schema.GroupVersionKind) string {
+	if s.client != nil {
+		if mapper := s.client.RESTMapper(); mapper != nil {
+			if mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err == nil {
+				return mapping.Resource.Resource
+			}
+		}
+	}
+
+	return strings.ToLower(gvk.Kind) + "s"
 }

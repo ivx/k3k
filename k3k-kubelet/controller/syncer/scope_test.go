@@ -332,3 +332,28 @@ func assertEqualJSON(t *testing.T, want, got any) {
 	}
 }
 
+func TestScopeSelectorsCreatesMissingSelector(t *testing.T) {
+	// no spec.selector at all: must end up pinned, not wide open
+	pdb := map[string]any{"spec": map[string]any{"minAvailable": int64(1)}}
+
+	if err := scopeSelectors(pdb, []string{"/spec/selector"}, "vc1", "team-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	sel := pdb["spec"].(map[string]any)["selector"].(map[string]any)["matchLabels"].(map[string]any)
+	if sel["k3k.io/clusterName"] != "vc1" || sel["k3k.io/namespaceName"] != "team-a" {
+		t.Fatalf("missing selector not created and scoped: %v", sel)
+	}
+
+	// wildcard tails are not created: a rule without fromEndpoints stays without
+	cnp := map[string]any{"spec": map[string]any{"ingress": []any{map[string]any{"fromEntities": []any{"world"}}}}}
+
+	if err := scopeSelectors(cnp, []string{"/spec/ingress/*/fromEndpoints/*"}, "vc1", "team-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	rule := cnp["spec"].(map[string]any)["ingress"].([]any)[0].(map[string]any)
+	if _, created := rule["fromEndpoints"]; created {
+		t.Fatal("wildcard tail must not be created")
+	}
+}

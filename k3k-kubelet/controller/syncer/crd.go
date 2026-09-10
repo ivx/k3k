@@ -73,6 +73,12 @@ func EnsureCustomResourceDefinitions(ctx context.Context, hostReader ctrlruntime
 
 		hostCRD := findCRD(crds.Items, gvk)
 		if hostCRD == nil {
+			// Built-in kinds (e.g. policy/v1 PodDisruptionBudget) have no CRD
+			// and are served by the virtual API server already.
+			if servedByVirtualCluster(virtClient, gvk) {
+				continue
+			}
+
 			return nil, fmt.Errorf("customResources entry %s: no CRD on the host serves this kind", gvk)
 		}
 
@@ -210,4 +216,15 @@ func waitEstablished(ctx context.Context, virtClient ctrlruntimeclient.Client, n
 
 		return false, nil
 	})
+}
+
+func servedByVirtualCluster(virtClient ctrlruntimeclient.Client, gvk schema.GroupVersionKind) bool {
+	mapper := virtClient.RESTMapper()
+	if mapper == nil {
+		return false
+	}
+
+	_, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+
+	return err == nil
 }

@@ -9,8 +9,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -76,7 +78,32 @@ func AddNamespaceTemplateSyncer(ctx context.Context, virtMgr, hostMgr manager.Ma
 	return ctrl.NewControllerManagedBy(virtMgr).
 		Named(reconciler.Translator.TranslateName(clusterNamespace, namespaceTemplateControllerName)).
 		For(&corev1.Namespace{}).
+		// A template change on the Cluster must re-render every namespace,
+		// not wait for the next namespace event.
+		WatchesRawSource(source.Kind(hostMgr.GetCache(), ctrlruntimeclient.Object(&v1beta1.Cluster{}),
+			handler.EnqueueRequestsFromMapFunc(reconciler.allNamespaces))).
 		Complete(&reconciler)
+}
+
+// allNamespaces enqueues every namespace of the virtual cluster when its
+// Cluster object changes.
+func (r *NamespaceTemplateReconciler) allNamespaces(ctx context.Context, obj ctrlruntimeclient.Object) []reconcile.Request {
+	if obj.GetName() != r.ClusterName || obj.GetNamespace() != r.ClusterNamespace {
+		return nil
+	}
+
+	var namespaces corev1.NamespaceList
+	if err := r.VirtualClient.List(ctx, &namespaces); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "listing virtual namespaces for template re-render")
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(namespaces.Items))
+	for _, ns := range namespaces.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: ns.Name}})
+	}
+
+	return requests
 }
 
 func (r *NamespaceTemplateReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {

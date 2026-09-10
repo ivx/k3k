@@ -79,11 +79,28 @@ func TestScopeSelector(t *testing.T) {
 			},
 		},
 		{
-			name: "namespace NotIn expression is rejected",
+			name: "namespace Exists expression means every namespace of this cluster",
+			selector: map[string]any{"matchExpressions": []any{
+				map[string]any{"key": "io.kubernetes.pod.namespace", "operator": "Exists"},
+			}},
+			want: map[string]any{
+				"matchLabels": map[string]any{"k3k.io/clusterName": "vc1"},
+				"matchExpressions": []any{
+					map[string]any{"key": "k3k.io/namespaceName", "operator": "Exists"},
+				},
+			},
+		},
+		{
+			name: "namespace NotIn expression stays inside the cluster scope",
 			selector: map[string]any{"matchExpressions": []any{
 				map[string]any{"key": "io.kubernetes.pod.namespace", "operator": "NotIn", "values": []any{"team-b"}},
 			}},
-			wantError: true,
+			want: map[string]any{
+				"matchLabels": map[string]any{"k3k.io/clusterName": "vc1"},
+				"matchExpressions": []any{
+					map[string]any{"key": "k3k.io/namespaceName", "operator": "NotIn", "values": []any{"team-b"}},
+				},
+			},
 		},
 		{
 			name: "namespace label selector is rejected",

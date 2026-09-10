@@ -146,10 +146,10 @@ func scopeSelector(sel map[string]any, clusterName, namespace string) error {
 				continue
 			}
 
-			if op, _ := expr["operator"].(string); op != "In" {
-				return fmt.Errorf("%w: namespace reference %s with operator %s cannot be translated (only In)", ErrRejected, key, op)
-			}
-
+			// Any operator is safe here: the cluster scope is forced below, so
+			// NotIn/Exists/DoesNotExist still only reach this virtual cluster.
+			// Exists is the idiom for "every namespace of my cluster" that
+			// platform components (ingress proxies) need.
 			expr["key"] = translate.NamespaceNameLabel
 			namespaceHandled = true
 		}

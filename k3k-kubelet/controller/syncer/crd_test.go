@@ -130,7 +130,7 @@ func TestApplyCRDCreatesThenUpdates(t *testing.T) {
 	}
 }
 
-func TestEnsureCustomResourceDefinitionsMissingHostCRDFails(t *testing.T) {
+func TestEnsureCustomResourceDefinitionsSkipsUnservedKinds(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := apiextensionsv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -138,25 +138,54 @@ func TestEnsureCustomResourceDefinitionsMissingHostCRDFails(t *testing.T) {
 
 	hostCRD := testCRD("virtualmachines.kubevirt.io", "kubevirt.io", "VirtualMachine", "v1")
 	host := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(&hostCRD).Build()
-	virt := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+
+	// the fake API server runs no CRD controller: seed the virtual side with
+	// an already-established copy so that the wait returns immediately
+	established := sanitizeCRD(&hostCRD)
+	established.Status.Conditions = []apiextensionsv1.CustomResourceDefinitionCondition{{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue}}
+	virt := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(established).WithStatusSubresource(&apiextensionsv1.CustomResourceDefinition{}).Build()
 
 	cluster := &v1beta1.Cluster{Spec: v1beta1.ClusterSpec{Sync: &v1beta1.SyncConfig{CustomResources: []v1beta1.CustomResourceSyncConfig{
 		{APIVersion: "cilium.io/v2", Kind: "CiliumNetworkPolicy", Enabled: true},
 	}}}}
 
-	if _, err := EnsureCustomResourceDefinitions(context.Background(), host, virt, cluster); err == nil {
-		t.Fatal("expected an error for a kind without a host CRD")
-	}
-
-	// disabled entries are ignored entirely
-	cluster.Spec.Sync.CustomResources[0].Enabled = false
-
-	wanted, err := EnsureCustomResourceDefinitions(context.Background(), host, virt, cluster)
+	// a kind nobody serves is skipped, not fatal: the other entries (and the
+	// pod sync) must keep working
+	result, err := EnsureCustomResourceDefinitions(context.Background(), host, virt, cluster)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(wanted) != 0 {
-		t.Fatalf("expected no wanted CRDs, got %v", wanted)
+	cnp := schema.GroupVersionKind{Group: "cilium.io", Version: "v2", Kind: "CiliumNetworkPolicy"}
+	if result.Ready[cnp] {
+		t.Fatal("unserved kind must not be ready")
+	}
+
+	// a kind with a host CRD is copied and ready
+	cluster.Spec.Sync.CustomResources = append(cluster.Spec.Sync.CustomResources,
+		v1beta1.CustomResourceSyncConfig{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine", Enabled: true})
+
+	result, err = EnsureCustomResourceDefinitions(context.Background(), host, virt, cluster)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	vm := schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"}
+	if !result.Ready[vm] || result.Wanted["virtualmachines.kubevirt.io"] != vm {
+		t.Fatalf("copied kind must be ready and wanted: %+v", result)
+	}
+
+	// disabled entries are ignored entirely
+	for i := range cluster.Spec.Sync.CustomResources {
+		cluster.Spec.Sync.CustomResources[i].Enabled = false
+	}
+
+	result, err = EnsureCustomResourceDefinitions(context.Background(), host, virt, cluster)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Wanted) != 0 {
+		t.Fatalf("expected no wanted CRDs, got %v", result.Wanted)
 	}
 }

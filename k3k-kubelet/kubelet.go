@@ -12,6 +12,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/node"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -348,13 +349,14 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 	// The CRDs behind sync.customResources entries come from the host: copy
 	// them into the virtual cluster before the syncers register their
 	// informers, then keep them in step with the host.
-	if err := ensureCustomResourceDefinitions(ctx, hostMgr, virtualMgr, hostClient, c); err != nil {
+	ready, err := ensureCustomResourceDefinitions(ctx, hostMgr, virtualMgr, hostClient, c)
+	if err != nil {
 		return err
 	}
 
 	logger.Info("adding custom resource syncer controllers")
 
-	if err := syncer.AddCustomResourceSyncers(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
+	if err := syncer.AddCustomResourceSyncers(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder, ready); err != nil {
 		return fmt.Errorf("failed to add custom resource syncer controllers: %w", err)
 	}
 
@@ -387,21 +389,25 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 // sync.customResources entries from the host into the virtual cluster and
 // registers the drift watch. The managers have not started yet, so it uses
 // direct clients.
-func ensureCustomResourceDefinitions(ctx context.Context, hostMgr, virtualMgr manager.Manager, hostClient ctrlruntimeclient.Client, c *config) error {
+func ensureCustomResourceDefinitions(ctx context.Context, hostMgr, virtualMgr manager.Manager, hostClient ctrlruntimeclient.Client, c *config) (map[schema.GroupVersionKind]bool, error) {
 	var cluster v1beta1.Cluster
 	if err := hostClient.Get(ctx, types.NamespacedName{Name: c.ClusterName, Namespace: c.ClusterNamespace}, &cluster); err != nil {
-		return fmt.Errorf("reading cluster for CRD sync: %w", err)
+		return nil, fmt.Errorf("reading cluster for CRD sync: %w", err)
 	}
 
 	virtClient, err := ctrlruntimeclient.New(virtualMgr.GetConfig(), ctrlruntimeclient.Options{Scheme: virtualMgr.GetScheme()})
 	if err != nil {
-		return fmt.Errorf("creating virtual cluster client for CRD sync: %w", err)
+		return nil, fmt.Errorf("creating virtual cluster client for CRD sync: %w", err)
 	}
 
-	wanted, err := syncer.EnsureCustomResourceDefinitions(ctx, hostClient, virtClient, &cluster)
+	result, err := syncer.EnsureCustomResourceDefinitions(ctx, hostClient, virtClient, &cluster)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return syncer.AddCRDSyncer(ctx, hostMgr, virtClient, c.ClusterName, wanted)
+	if err := syncer.AddCRDSyncer(ctx, hostMgr, virtClient, c.ClusterName, result.Wanted); err != nil {
+		return nil, err
+	}
+
+	return result.Ready, nil
 }

@@ -60,7 +60,10 @@ type CustomResourceReconciler struct {
 // still processed for cleanup. Because controller-runtime informers start
 // with a full LIST, pre-existing virtual objects are replayed at startup —
 // enabling a type and restarting the kubelet backfills everything.
-func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, recorder record.EventRecorder) error {
+//
+// ready limits registration to the GVKs whose type the virtual cluster serves
+// (see EnsureCustomResourceDefinitions); nil means all enabled entries.
+func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, recorder record.EventRecorder, ready map[schema.GroupVersionKind]bool) error {
 	var cluster v1beta1.Cluster
 
 	// The manager caches have not started yet — use the direct reader.
@@ -71,6 +74,13 @@ func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Mana
 	for _, cfg := range CustomResourceEntries(&cluster) {
 		if !cfg.Enabled {
 			continue
+		}
+
+		if ready != nil {
+			gv, err := schema.ParseGroupVersion(cfg.APIVersion)
+			if err != nil || !ready[gv.WithKind(cfg.Kind)] {
+				continue
+			}
 		}
 
 		if err := addCustomResourceSyncer(virtMgr, hostMgr, clusterName, clusterNamespace, cfg, recorder); err != nil {

@@ -41,17 +41,34 @@ type CRDReconciler struct {
 	wanted map[string]schema.GroupVersionKind
 }
 
+// CRDSyncResult reports which entries are ready to be synced after the CRD
+// copy: Ready holds the GVKs whose type is served by the virtual cluster (copied
+// from the host, or built in); Wanted maps the copied host CRD names to their
+// GVK for the drift watch, see AddCRDSyncer.
+type CRDSyncResult struct {
+	Ready  map[schema.GroupVersionKind]bool
+	Wanted map[string]schema.GroupVersionKind
+}
+
 // EnsureCustomResourceDefinitions copies the CRD behind every enabled
 // sync.customResources entry from the host into the virtual cluster and waits
 // until it is established. It runs before the custom-resource syncers are
-// registered, so their informers always find the type. The returned map
-// (host CRD name -> GVK) feeds the drift watch, see AddCRDSyncer.
-func EnsureCustomResourceDefinitions(ctx context.Context, hostReader ctrlruntimeclient.Reader, virtClient ctrlruntimeclient.Client, cluster *v1beta1.Cluster) (map[string]schema.GroupVersionKind, error) {
+// registered, so their informers always find the type.
+//
+// An entry whose kind is served neither by a host CRD nor by the virtual
+// cluster itself (operator not installed on the host) is logged and left out
+// of Ready: one stale entry must not take the whole kubelet - and with it
+// every pod of the virtual cluster - down.
+func EnsureCustomResourceDefinitions(ctx context.Context, hostReader ctrlruntimeclient.Reader, virtClient ctrlruntimeclient.Client, cluster *v1beta1.Cluster) (*CRDSyncResult, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("cluster", cluster.Name)
-	wanted := map[string]schema.GroupVersionKind{}
+	result := &CRDSyncResult{
+		Ready:  map[schema.GroupVersionKind]bool{},
+		Wanted: map[string]schema.GroupVersionKind{},
+	}
 
-	if cluster.Spec.Sync == nil {
-		return wanted, nil
+	entries := CustomResourceEntries(cluster)
+	if len(entries) == 0 {
+		return result, nil
 	}
 
 	var crds apiextensionsv1.CustomResourceDefinitionList
@@ -59,7 +76,7 @@ func EnsureCustomResourceDefinitions(ctx context.Context, hostReader ctrlruntime
 		return nil, fmt.Errorf("listing host CRDs: %w", err)
 	}
 
-	for _, cfg := range cluster.Spec.Sync.CustomResources {
+	for _, cfg := range entries {
 		if !cfg.Enabled {
 			continue
 		}
@@ -76,13 +93,14 @@ func EnsureCustomResourceDefinitions(ctx context.Context, hostReader ctrlruntime
 			// Built-in kinds (e.g. policy/v1 PodDisruptionBudget) have no CRD
 			// and are served by the virtual API server already.
 			if servedByVirtualCluster(virtClient, gvk) {
+				result.Ready[gvk] = true
 				continue
 			}
 
-			return nil, fmt.Errorf("customResources entry %s: no CRD on the host serves this kind", gvk)
-		}
+			log.Error(nil, "customResources entry skipped: no CRD on the host serves this kind (operator not installed?)", "gvk", gvk.String())
 
-		wanted[hostCRD.Name] = gvk
+			continue
+		}
 
 		if err := applyCRD(ctx, virtClient, hostCRD); err != nil {
 			return nil, fmt.Errorf("copying CRD %s into the virtual cluster: %w", hostCRD.Name, err)
@@ -92,10 +110,13 @@ func EnsureCustomResourceDefinitions(ctx context.Context, hostReader ctrlruntime
 			return nil, err
 		}
 
+		result.Wanted[hostCRD.Name] = gvk
+		result.Ready[gvk] = true
+
 		log.Info("CRD copied from the host", "crd", hostCRD.Name, "gvk", gvk.String())
 	}
 
-	return wanted, nil
+	return result, nil
 }
 
 // AddCRDSyncer watches the host CRDs that back configured entries and

@@ -111,6 +111,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 	if err := r.HostClient.Get(ctx, types.NamespacedName{Name: syncedService.Name, Namespace: r.ClusterNamespace}, &hostService); err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("creating the service for the first time on the host cluster")
+
 			if err := r.HostClient.Create(ctx, syncedService); err != nil {
 				return reconcile.Result{}, err
 			}

@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -40,6 +41,7 @@ var baseScheme = runtime.NewScheme()
 func init() {
 	_ = clientgoscheme.AddToScheme(baseScheme)
 	_ = v1beta1.AddToScheme(baseScheme)
+	_ = apiextensionsv1.AddToScheme(baseScheme)
 }
 
 type kubelet struct {
@@ -116,6 +118,11 @@ func newKubelet(ctx context.Context, c *config) (*kubelet, error) {
 	virtualScheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(virtualScheme); err != nil {
 		return nil, fmt.Errorf("unable to add client go types to virtual cluster scheme: %w", err)
+	}
+
+	// CRDs copied from the host for sync.customResources entries
+	if err := apiextensionsv1.AddToScheme(virtualScheme); err != nil {
+		return nil, fmt.Errorf("unable to add apiextensions types to virtual cluster scheme: %w", err)
 	}
 
 	virtualMgr, err := ctrl.NewManager(virtConfig, manager.Options{
@@ -344,6 +351,13 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 		return fmt.Errorf("failed to add pdb syncer controller: %w", err)
 	}
 
+	// The CRDs behind sync.customResources entries come from the host: copy
+	// them into the virtual cluster before the syncers register their
+	// informers, then keep them in step with the host.
+	if err := ensureCustomResourceDefinitions(ctx, hostMgr, virtualMgr, hostClient, c); err != nil {
+		return err
+	}
+
 	logger.Info("adding custom resource syncer controllers")
 
 	if err := syncer.AddCustomResourceSyncers(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
@@ -369,4 +383,27 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 	}
 
 	return nil
+}
+
+// ensureCustomResourceDefinitions copies the CRDs of the enabled
+// sync.customResources entries from the host into the virtual cluster and
+// registers the drift watch. The managers have not started yet, so it uses
+// direct clients.
+func ensureCustomResourceDefinitions(ctx context.Context, hostMgr, virtualMgr manager.Manager, hostClient ctrlruntimeclient.Client, c *config) error {
+	var cluster v1beta1.Cluster
+	if err := hostClient.Get(ctx, types.NamespacedName{Name: c.ClusterName, Namespace: c.ClusterNamespace}, &cluster); err != nil {
+		return fmt.Errorf("reading cluster for CRD sync: %w", err)
+	}
+
+	virtClient, err := ctrlruntimeclient.New(virtualMgr.GetConfig(), ctrlruntimeclient.Options{Scheme: virtualMgr.GetScheme()})
+	if err != nil {
+		return fmt.Errorf("creating virtual cluster client for CRD sync: %w", err)
+	}
+
+	wanted, err := syncer.EnsureCustomResourceDefinitions(ctx, hostClient, virtClient, &cluster)
+	if err != nil {
+		return err
+	}
+
+	return syncer.AddCRDSyncer(ctx, hostMgr, virtClient, c.ClusterName, wanted)
 }

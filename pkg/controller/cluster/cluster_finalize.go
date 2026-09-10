@@ -80,7 +80,7 @@ func (c *ClusterReconciler) unbindClusterRoles(ctx context.Context, cluster *v1b
 	log := ctrl.LoggerFrom(ctx)
 	log.V(1).Info("Unbinding ClusterRoles")
 
-	clusterRoles := []string{"k3k-kubelet-node", "k3k-priorityclass"}
+	clusterRoles := []string{"k3k-kubelet-node", "k3k-priorityclass", kubeletCRDClusterRole}
 
 	var err error
 

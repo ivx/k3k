@@ -17,7 +17,7 @@ import (
 	"github.com/rancher/k3k/pkg/apis/k3k.io/v1beta1"
 )
 
-func rawJSON(t *testing.T, v interface{}) *runtime.RawExtension {
+func rawJSON(t *testing.T, v any) *runtime.RawExtension {
 	t.Helper()
 
 	b, err := json.Marshal(v)
@@ -29,7 +29,7 @@ func rawJSON(t *testing.T, v interface{}) *runtime.RawExtension {
 }
 
 func TestApplyPatchAddCreatesIntermediateMaps(t *testing.T) {
-	obj := map[string]interface{}{"spec": map[string]interface{}{}}
+	obj := map[string]any{"spec": map[string]any{}}
 
 	if err := applyPatch(obj, "add", "/spec/template/spec/dnsPolicy", "None"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -42,7 +42,7 @@ func TestApplyPatchAddCreatesIntermediateMaps(t *testing.T) {
 }
 
 func TestApplyPatchReplaceMissingPathFails(t *testing.T) {
-	obj := map[string]interface{}{"spec": map[string]interface{}{}}
+	obj := map[string]any{"spec": map[string]any{}}
 
 	if err := applyPatch(obj, "replace", "/spec/missing/leaf", "x"); err == nil {
 		t.Fatal("expected error for replace on a missing path")
@@ -50,9 +50,9 @@ func TestApplyPatchReplaceMissingPathFails(t *testing.T) {
 }
 
 func TestApplyPatchSliceAppend(t *testing.T) {
-	obj := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"args": []interface{}{"a"},
+	obj := map[string]any{
+		"spec": map[string]any{
+			"args": []any{"a"},
 		},
 	}
 
@@ -67,7 +67,7 @@ func TestApplyPatchSliceAppend(t *testing.T) {
 }
 
 func TestApplyPatchUnsupportedOp(t *testing.T) {
-	if err := applyPatch(map[string]interface{}{}, "remove", "/spec", nil); err == nil {
+	if err := applyPatch(map[string]any{}, "remove", "/spec", nil); err == nil {
 		t.Fatal("expected error for unsupported op")
 	}
 }
@@ -101,15 +101,15 @@ func TestTranslatedAppliesPatchesAndSubstitution(t *testing.T) {
 		GVK: schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"},
 	}
 
-	virtObj := &unstructured.Unstructured{Object: map[string]interface{}{
+	virtObj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "kubevirt.io/v1",
 		"kind":       "VirtualMachine",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      "testvm",
 			"namespace": "default",
 		},
-		"spec":   map[string]interface{}{"runStrategy": "Always"},
-		"status": map[string]interface{}{"ready": true},
+		"spec":   map[string]any{"runStrategy": "Always"},
+		"status": map[string]any{"ready": true},
 	}}
 
 	cfg := &v1beta1.CustomResourceSyncConfig{
@@ -118,7 +118,7 @@ func TestTranslatedAppliesPatchesAndSubstitution(t *testing.T) {
 		Enabled:    true,
 		Patches: []v1beta1.CustomResourcePatch{
 			{Op: "add", Path: "/spec/template/spec/dnsPolicy", Value: rawJSON(t, "None")},
-			{Op: "add", Path: "/spec/template/spec/dnsConfig", Value: rawJSON(t, map[string]interface{}{
+			{Op: "add", Path: "/spec/template/spec/dnsConfig", Value: rawJSON(t, map[string]any{
 				"nameservers": []string{"$(VC_DNS)"},
 				"searches":    []string{"default.svc.cluster.local"},
 			})},

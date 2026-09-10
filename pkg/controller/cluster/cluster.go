@@ -921,8 +921,52 @@ func (c *ClusterReconciler) server(ctx context.Context, cluster *v1beta1.Cluster
 	return err
 }
 
+// kubeletCRDClusterRole grants the shared agents read access to host CRDs, so a
+// kubelet can copy the CRDs behind its sync.customResources entries into the
+// virtual cluster. Created by the controller (not the chart) so that clusters
+// installed from an older chart get it too.
+const kubeletCRDClusterRole = "k3k-kubelet-crd"
+
+func (c *ClusterReconciler) ensureKubeletCRDClusterRole(ctx context.Context) error {
+	role := &rbacv1.ClusterRole{}
+	role.Name = kubeletCRDClusterRole
+
+	if _, err := controllerutil.CreateOrUpdate(ctx, c.Client, role, func() error {
+		role.Rules = []rbacv1.PolicyRule{{
+			APIGroups: []string{"apiextensions.k8s.io"},
+			Resources: []string{"customresourcedefinitions"},
+			Verbs:     []string{"get", "list", "watch"},
+		}}
+
+		return nil
+	}); err != nil {
+		return fmt.Errorf("ensuring ClusterRole %s: %w", kubeletCRDClusterRole, err)
+	}
+
+	binding := &rbacv1.ClusterRoleBinding{}
+	binding.Name = kubeletCRDClusterRole
+
+	if err := c.Client.Get(ctx, types.NamespacedName{Name: kubeletCRDClusterRole}, binding); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+
+		binding.RoleRef = rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: kubeletCRDClusterRole}
+
+		if err := c.Client.Create(ctx, binding); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating ClusterRoleBinding %s: %w", kubeletCRDClusterRole, err)
+		}
+	}
+
+	return nil
+}
+
 func (c *ClusterReconciler) bindClusterRoles(ctx context.Context, cluster *v1beta1.Cluster) error {
-	clusterRoles := []string{"k3k-kubelet-node", "k3k-priorityclass"}
+	if err := c.ensureKubeletCRDClusterRole(ctx); err != nil {
+		return err
+	}
+
+	clusterRoles := []string{"k3k-kubelet-node", "k3k-priorityclass", kubeletCRDClusterRole}
 
 	var err error
 

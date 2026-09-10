@@ -7,12 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
-	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -20,6 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/rancher/k3k/k3k-kubelet/translate"
 	"github.com/rancher/k3k/pkg/apis/k3k.io/v1beta1"
@@ -276,7 +276,7 @@ func (r *CustomResourceReconciler) translated(ctx context.Context, virtObj *unst
 	}
 
 	for _, p := range cfg.Patches {
-		var value interface{}
+		var value any
 
 		if p.Value != nil {
 			raw := string(p.Value.Raw)
@@ -323,7 +323,7 @@ func (r *CustomResourceReconciler) substitutions(ctx context.Context, virtNamesp
 // applyPatch applies one add/replace operation at a JSON-pointer path on an
 // unstructured object tree. Intermediate maps are created for "add"; slice
 // indices and the "-" append marker are supported on existing slices.
-func applyPatch(root map[string]interface{}, op, path string, value interface{}) error {
+func applyPatch(root map[string]any, op, path string, value any) error {
 	if op != "add" && op != "replace" {
 		return fmt.Errorf("unsupported op %q", op)
 	}
@@ -337,18 +337,18 @@ func applyPatch(root map[string]interface{}, op, path string, value interface{})
 		segments[i] = strings.ReplaceAll(strings.ReplaceAll(s, "~1", "/"), "~0", "~")
 	}
 
-	var cur interface{} = root
+	var cur any = root
 
 	for _, seg := range segments[:len(segments)-1] {
 		switch node := cur.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			next, ok := node[seg]
 			if !ok {
 				if op == "replace" {
 					return fmt.Errorf("path segment %q not found", seg)
 				}
 
-				created := map[string]interface{}{}
+				created := map[string]any{}
 				node[seg] = created
 				cur = created
 
@@ -356,7 +356,7 @@ func applyPatch(root map[string]interface{}, op, path string, value interface{})
 			}
 
 			cur = next
-		case []interface{}:
+		case []any:
 			idx, err := strconv.Atoi(seg)
 			if err != nil || idx < 0 || idx >= len(node) {
 				return fmt.Errorf("invalid slice index %q", seg)
@@ -371,7 +371,7 @@ func applyPatch(root map[string]interface{}, op, path string, value interface{})
 	last := segments[len(segments)-1]
 
 	switch node := cur.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		if op == "replace" {
 			if _, ok := node[last]; !ok {
 				return fmt.Errorf("replace target %q not found", last)
@@ -379,7 +379,7 @@ func applyPatch(root map[string]interface{}, op, path string, value interface{})
 		}
 
 		node[last] = value
-	case []interface{}:
+	case []any:
 		return patchSlice(root, segments, node, op, last, value)
 	default:
 		return fmt.Errorf("cannot patch %q: parent is not an object or array", last)
@@ -391,7 +391,7 @@ func applyPatch(root map[string]interface{}, op, path string, value interface{})
 // patchSlice handles the final segment pointing into a slice: numeric index
 // replacement or "-" append. The parent reference must be rewritten because
 // append reallocates.
-func patchSlice(root map[string]interface{}, segments []string, node []interface{}, op, last string, value interface{}) error {
+func patchSlice(root map[string]any, segments []string, node []any, op, last string, value any) error {
 	if last == "-" {
 		if op != "add" {
 			return fmt.Errorf("append needs op add")
@@ -410,14 +410,14 @@ func patchSlice(root map[string]interface{}, segments []string, node []interface
 	return nil
 }
 
-func replaceParentSlice(root map[string]interface{}, parentSegments []string, newSlice []interface{}) error {
-	var cur interface{} = root
+func replaceParentSlice(root map[string]any, parentSegments []string, newSlice []any) error {
+	var cur any = root
 
 	for _, seg := range parentSegments[:len(parentSegments)-1] {
 		switch node := cur.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			cur = node[seg]
-		case []interface{}:
+		case []any:
 			idx, err := strconv.Atoi(seg)
 			if err != nil || idx < 0 || idx >= len(node) {
 				return fmt.Errorf("invalid slice index %q", seg)
@@ -429,7 +429,7 @@ func replaceParentSlice(root map[string]interface{}, parentSegments []string, ne
 		}
 	}
 
-	parent, ok := cur.(map[string]interface{})
+	parent, ok := cur.(map[string]any)
 	if !ok {
 		return fmt.Errorf("append parent is not an object")
 	}

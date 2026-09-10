@@ -120,6 +120,7 @@ func TestPDBSyncerReconcile(t *testing.T) {
 		require.NoError(t, err)
 
 		var hostPDB policyv1.PodDisruptionBudget
+
 		hostName := syncer.Translator.TranslateName("team-a", "web-pdb")
 		require.NoError(t, syncer.HostClient.Get(context.Background(), types.NamespacedName{Name: hostName, Namespace: "ns-1"}, &hostPDB))
 
@@ -148,6 +149,7 @@ func TestPDBSyncerReconcile(t *testing.T) {
 		require.NoError(t, err)
 
 		var hostPDB policyv1.PodDisruptionBudget
+
 		hostName := syncer.Translator.TranslateName("team-a", "web-pdb")
 		require.NoError(t, syncer.HostClient.Get(context.Background(), types.NamespacedName{Name: hostName, Namespace: "ns-1"}, &hostPDB))
 
@@ -171,6 +173,7 @@ func TestPDBSyncerReconcile(t *testing.T) {
 
 		// host pdb is gone
 		var hostPDB policyv1.PodDisruptionBudget
+
 		hostName := syncer.Translator.TranslateName("team-a", "web-pdb")
 		err = syncer.HostClient.Get(context.Background(), types.NamespacedName{Name: hostName, Namespace: "ns-1"}, &hostPDB)
 		assert.True(t, apierrors.IsNotFound(err))

@@ -199,6 +199,8 @@ func (r *NamespaceTemplateReconciler) render(ctx context.Context, gvk schema.Gro
 
 	delete(obj.Object, "status")
 
+	stampSpecHash(obj)
+
 	return obj, nil
 }
 
@@ -212,6 +214,11 @@ func (r *NamespaceTemplateReconciler) apply(ctx context.Context, obj *unstructur
 		}
 
 		return err
+	}
+
+	// unchanged template output: leave the host object alone
+	if existing.GetAnnotations()[SpecHashAnnotation] == obj.GetAnnotations()[SpecHashAnnotation] {
+		return nil
 	}
 
 	existing.SetLabels(obj.GetLabels())

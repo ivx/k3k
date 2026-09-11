@@ -2,6 +2,8 @@ package syncer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -300,21 +303,28 @@ func (r *CustomResourceReconciler) Reconcile(ctx context.Context, req reconcile.
 		return reconcile.Result{}, err
 	}
 
-	// spec/labels/annotations flow down; everything else stays host-owned
-	existing.SetLabels(hostObj.GetLabels())
-	existing.SetAnnotations(hostObj.GetAnnotations())
+	// spec/labels/annotations flow down; everything else stays host-owned.
+	// Only write when the virtual side changed (content hash): the host
+	// operator's mutating webhooks default fields in spec, and rewriting
+	// the virtual spec on every pass would undo them, bump the generation,
+	// trigger the host watch and loop (seen with KubeVirt: thousands of
+	// generations, virt-launcher re-syncing the domain every second).
+	if existing.GetAnnotations()[SpecHashAnnotation] != hostObj.GetAnnotations()[SpecHashAnnotation] {
+		existing.SetLabels(hostObj.GetLabels())
+		existing.SetAnnotations(hostObj.GetAnnotations())
 
-	if spec, ok := hostObj.Object["spec"]; ok {
-		existing.Object["spec"] = spec
-	}
+		if spec, ok := hostObj.Object["spec"]; ok {
+			existing.Object["spec"] = spec
+		}
 
-	if err := r.HostClient.Update(ctx, &existing); err != nil {
-		return reconcile.Result{}, err
+		if err := r.HostClient.Update(ctx, &existing); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 
 	// status flows up when requested; the virtual KCM never computes it
 	if cfg.SyncStatus {
-		if status, ok := existing.Object["status"]; ok {
+		if status, ok := existing.Object["status"]; ok && !equality.Semantic.DeepEqual(status, virtObj.Object["status"]) {
 			virtObj.Object["status"] = status
 
 			if err := r.VirtualClient.Status().Update(ctx, virtObj); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
@@ -354,7 +364,37 @@ func (r *CustomResourceReconciler) translated(ctx context.Context, virtObj *unst
 		return nil, err
 	}
 
+	stampSpecHash(hostObj)
+
 	return hostObj, nil
+}
+
+// SpecHashAnnotation records, on the host copy, a hash of what the virtual
+// side asked for (labels, annotations, spec). Unchanged hash = no write.
+const SpecHashAnnotation = "k3k.io/spec-hash"
+
+// stampSpecHash sets SpecHashAnnotation on obj from its labels, its other
+// annotations and its spec.
+func stampSpecHash(obj *unstructured.Unstructured) {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	delete(annotations, SpecHashAnnotation)
+
+	content := map[string]any{
+		"labels":      obj.GetLabels(),
+		"annotations": annotations,
+		"spec":        obj.Object["spec"],
+	}
+
+	// json.Marshal sorts map keys: deterministic across runs
+	raw, _ := json.Marshal(content)
+	sum := sha256.Sum256(raw)
+
+	annotations[SpecHashAnnotation] = hex.EncodeToString(sum[:])
+	obj.SetAnnotations(annotations)
 }
 
 func (r *CustomResourceReconciler) applyPatches(ctx context.Context, hostObj *unstructured.Unstructured, virtNamespace string, patches []v1beta1.CustomResourcePatch) error {

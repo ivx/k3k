@@ -256,3 +256,51 @@ func TestNamespaceTemplateRenderRejectsWrongKind(t *testing.T) {
 	_, err = r.render(context.Background(), pdbGVK, noName, "team-a")
 	require.Error(t, err)
 }
+
+// The host operator's webhooks default fields into spec; the syncer must not
+// fight them: no write when the virtual side is unchanged.
+func TestGenericReconcileIsIdempotentAndKeepsHostDefaults(t *testing.T) {
+	minAvailable := intstr.FromInt32(1)
+	virtPDB := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-pdb", Namespace: "team-a"},
+		Spec:       policyv1.PodDisruptionBudgetSpec{MinAvailable: &minAvailable, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}},
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "web-pdb", Namespace: "team-a"}}
+	r := newPDBReconciler(t, v1beta1.PodDisruptionBudgetSyncConfig{Enabled: true}, nil, []runtime.Object{virtPDB})
+	hostKey := types.NamespacedName{Name: r.Translator.TranslateName("team-a", "web-pdb"), Namespace: "ns-1"}
+
+	_, err := r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var host policyv1.PodDisruptionBudget
+	require.NoError(t, r.HostClient.Get(context.Background(), hostKey, &host))
+	rv1 := host.ResourceVersion
+	require.NotEmpty(t, host.Annotations[SpecHashAnnotation])
+
+	// "webhook default" on the host side
+	policy := policyv1.AlwaysAllow
+	host.Spec.UnhealthyPodEvictionPolicy = &policy
+	require.NoError(t, r.HostClient.Update(context.Background(), &host))
+	require.NoError(t, r.HostClient.Get(context.Background(), hostKey, &host))
+	rv2 := host.ResourceVersion
+
+	_, err = r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.NoError(t, r.HostClient.Get(context.Background(), hostKey, &host))
+	assert.Equal(t, rv2, host.ResourceVersion, "unchanged virtual object must not write the host copy")
+	assert.NotNil(t, host.Spec.UnhealthyPodEvictionPolicy, "host-side default must survive")
+	assert.NotEqual(t, rv1, rv2)
+
+	// a real change on the virtual side propagates
+	var virt policyv1.PodDisruptionBudget
+	require.NoError(t, r.VirtualClient.Get(context.Background(), req.NamespacedName, &virt))
+	two := intstr.FromInt32(2)
+	virt.Spec.MinAvailable = &two
+	require.NoError(t, r.VirtualClient.Update(context.Background(), &virt))
+
+	_, err = r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.NoError(t, r.HostClient.Get(context.Background(), hostKey, &host))
+	assert.Equal(t, &two, host.Spec.MinAvailable)
+	assert.NotEqual(t, rv2, host.ResourceVersion)
+}

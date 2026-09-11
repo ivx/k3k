@@ -294,6 +294,7 @@ func TestGenericReconcileIsIdempotentAndKeepsHostDefaults(t *testing.T) {
 	// a real change on the virtual side propagates
 	var virt policyv1.PodDisruptionBudget
 	require.NoError(t, r.VirtualClient.Get(context.Background(), req.NamespacedName, &virt))
+
 	two := intstr.FromInt32(2)
 	virt.Spec.MinAvailable = &two
 	require.NoError(t, r.VirtualClient.Update(context.Background(), &virt))

@@ -45,7 +45,7 @@ var ServiceTests = func() {
 		err = hostTestEnv.k8sClient.Create(ctx, &cluster)
 		Expect(err).NotTo(HaveOccurred())
 
-		err = syncer.AddServiceSyncer(ctx, virtManager, hostManager, cluster.Name, cluster.Namespace)
+		err = syncer.AddServiceSyncer(ctx, virtManager, hostManager, cluster.Name, cluster.Namespace, nil)
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -272,5 +272,84 @@ var ServiceTests = func() {
 			WithPolling(time.Millisecond * 300).
 			WithTimeout(time.Second * 10).
 			Should(BeTrue())
+	})
+
+	It("gives a virtual service a new ClusterIP when the host already uses it", func() {
+		ctx := context.Background()
+
+		// a host service holds an IP; the virtual service asks for the same IP
+		blocker := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "blocker-", Namespace: namespace},
+			Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "p", Port: 80}}},
+		}
+		Expect(hostTestEnv.k8sClient.Create(ctx, blocker)).To(Succeed())
+
+		takenIP := blocker.Spec.ClusterIP
+		Expect(takenIP).NotTo(BeEmpty())
+
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "service-", Namespace: "default"},
+			Spec: corev1.ServiceSpec{
+				ClusterIP: takenIP,
+				Ports:     []corev1.ServicePort{{Name: "p", Port: 80}},
+			},
+		}
+		Expect(virtTestEnv.k8sClient.Create(ctx, service)).To(Succeed())
+
+		By(fmt.Sprintf("Created service %s with the host's IP %s in the virtual cluster", service.Name, takenIP))
+
+		hostServiceName := translateName(cluster, service.Namespace, service.Name)
+
+		var virtService, hostService corev1.Service
+
+		// the syncer recreates the virtual service without the taken IP, the
+		// virtual cluster assigns a new one, and the host copy carries it
+		Eventually(func(g Gomega) {
+			g.Expect(virtTestEnv.k8sClient.Get(ctx, client.ObjectKey{Name: service.Name, Namespace: "default"}, &virtService)).To(Succeed())
+			g.Expect(virtService.Spec.ClusterIP).NotTo(Equal(takenIP))
+			g.Expect(hostTestEnv.k8sClient.Get(ctx, client.ObjectKey{Name: hostServiceName, Namespace: namespace}, &hostService)).To(Succeed())
+			g.Expect(hostService.Spec.ClusterIP).To(Equal(virtService.Spec.ClusterIP))
+		}).
+			WithPolling(time.Millisecond * 300).
+			WithTimeout(time.Second * 20).
+			Should(Succeed())
+
+		Expect(virtService.UID).NotTo(Equal(service.UID), "the virtual service was created again")
+	})
+
+	It("creates the host copy again when it is deleted on the host", func() {
+		ctx := context.Background()
+
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "service-", Namespace: "default"},
+			Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "p", Port: 80}}},
+		}
+		Expect(virtTestEnv.k8sClient.Create(ctx, service)).To(Succeed())
+
+		hostServiceName := translateName(cluster, service.Namespace, service.Name)
+		key := client.ObjectKey{Name: hostServiceName, Namespace: namespace}
+
+		var hostService corev1.Service
+
+		Eventually(func() error {
+			return hostTestEnv.k8sClient.Get(ctx, key, &hostService)
+		}).
+			WithPolling(time.Millisecond * 300).
+			WithTimeout(time.Second * 10).
+			Should(Succeed())
+
+		oldUID := hostService.UID
+		Expect(hostTestEnv.k8sClient.Delete(ctx, &hostService)).To(Succeed())
+
+		// no change on the virtual side: only the host watch can bring it back
+		Eventually(func(g Gomega) {
+			var again corev1.Service
+			g.Expect(hostTestEnv.k8sClient.Get(ctx, key, &again)).To(Succeed())
+			g.Expect(again.UID).NotTo(Equal(oldUID))
+			g.Expect(again.Spec.ClusterIP).To(Equal(service.Spec.ClusterIP))
+		}).
+			WithPolling(time.Millisecond * 300).
+			WithTimeout(time.Second * 10).
+			Should(Succeed())
 	})
 }

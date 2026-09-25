@@ -5,11 +5,15 @@ import (
 
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,7 +38,7 @@ func (c *ConfigMapSyncer) Name() string {
 }
 
 // AddConfigMapSyncer adds configmap syncer controller to the manager of the virtual cluster
-func AddConfigMapSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string) error {
+func AddConfigMapSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, recorder record.EventRecorder) error {
 	reconciler := ConfigMapSyncer{
 		SyncerContext: &SyncerContext{
 			VirtualClient: virtMgr.GetClient(),
@@ -45,6 +49,7 @@ func AddConfigMapSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, c
 			},
 			ClusterName:      clusterName,
 			ClusterNamespace: clusterNamespace,
+			Recorder:         recorder,
 		},
 	}
 
@@ -52,7 +57,10 @@ func AddConfigMapSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, c
 
 	return ctrl.NewControllerManagedBy(virtMgr).
 		Named(name).
-		For(&corev1.ConfigMap{}).WithEventFilter(predicate.NewPredicateFuncs(reconciler.filterResources)).
+		For(&corev1.ConfigMap{}, builder.WithPredicates(predicate.NewPredicateFuncs(reconciler.filterResources))).
+		// host-side changes (a deleted or changed copy) map back to the virtual object
+		WatchesRawSource(source.Kind(hostMgr.GetCache(), client.Object(&corev1.ConfigMap{}),
+			handler.EnqueueRequestsFromMapFunc(reconciler.mapHostToVirtual))).
 		Complete(&reconciler)
 }
 
@@ -121,6 +129,11 @@ func (c *ConfigMapSyncer) Reconcile(ctx context.Context, req reconcile.Request) 
 		return reconcile.Result{}, nil
 	}
 
+	// host events reach the reconciler without the virtual-side filter
+	if !c.filterResources(&virtualConfigMap) {
+		return reconcile.Result{}, nil
+	}
+
 	// Add finalizer if it does not exist
 	if controllerutil.AddFinalizer(&virtualConfigMap, configMapFinalizerName) {
 		if err := c.VirtualClient.Update(ctx, &virtualConfigMap); err != nil {
@@ -128,20 +141,7 @@ func (c *ConfigMapSyncer) Reconcile(ctx context.Context, req reconcile.Request) 
 		}
 	}
 
-	var hostConfigMap corev1.ConfigMap
-	if err := c.HostClient.Get(ctx, types.NamespacedName{Name: syncedConfigMap.Name, Namespace: syncedConfigMap.Namespace}, &hostConfigMap); err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Info("creating the ConfigMap for the first time on the host cluster")
-			return reconcile.Result{}, c.HostClient.Create(ctx, syncedConfigMap)
-		}
-
-		return reconcile.Result{}, err
-	}
-
-	// TODO: Add option to keep labels/annotation set by the host cluster
-	log.Info("updating ConfigMap on the host cluster")
-
-	return reconcile.Result{}, c.HostClient.Update(ctx, syncedConfigMap)
+	return reconcile.Result{}, c.writeHostCopy(ctx, &virtualConfigMap, syncedConfigMap, &corev1.ConfigMap{})
 }
 
 // translateConfigMap will translate a given configMap created in the virtual cluster and

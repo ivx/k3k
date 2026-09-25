@@ -52,8 +52,7 @@ const (
 // the host object's status flows back to the virtual object.
 type CustomResourceReconciler struct {
 	*SyncerContext
-	GVK      schema.GroupVersionKind
-	Recorder record.EventRecorder
+	GVK schema.GroupVersionKind
 }
 
 // AddCustomResourceSyncers registers one syncer controller per enabled
@@ -147,9 +146,9 @@ func addCustomResourceSyncer(virtMgr, hostMgr manager.Manager, clusterName, clus
 				ClusterName:      clusterName,
 				ClusterNamespace: clusterNamespace,
 			},
+			Recorder: recorder,
 		},
-		GVK:      gvk,
-		Recorder: recorder,
+		GVK: gvk,
 	}
 
 	virtObj := &unstructured.Unstructured{}
@@ -168,26 +167,6 @@ func addCustomResourceSyncer(virtMgr, hostMgr manager.Manager, clusterName, clus
 		WatchesRawSource(source.Kind(hostMgr.GetCache(), ctrlruntimeclient.Object(hostObj),
 			handler.EnqueueRequestsFromMapFunc(reconciler.mapHostToVirtual))).
 		Complete(&reconciler)
-}
-
-// mapHostToVirtual enqueues the virtual object a synced host object belongs
-// to, using the annotations the translator stamps on the way down.
-func (r *CustomResourceReconciler) mapHostToVirtual(ctx context.Context, obj ctrlruntimeclient.Object) []reconcile.Request {
-	labels := obj.GetLabels()
-	if labels[translate.ClusterNameLabel] != r.ClusterName {
-		return nil
-	}
-
-	annotations := obj.GetAnnotations()
-
-	name := annotations[translate.ResourceNameAnnotation]
-	namespace := annotations[translate.ResourceNamespaceAnnotation]
-
-	if name == "" {
-		return nil
-	}
-
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: name, Namespace: namespace}}}
 }
 
 func (r *CustomResourceReconciler) config(cluster *v1beta1.Cluster) *v1beta1.CustomResourceSyncConfig {

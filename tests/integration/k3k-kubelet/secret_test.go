@@ -44,7 +44,7 @@ var SecretTests = func() {
 		err = hostTestEnv.k8sClient.Create(ctx, &cluster)
 		Expect(err).NotTo(HaveOccurred())
 
-		err = syncer.AddSecretSyncer(ctx, virtManager, hostManager, cluster.Name, cluster.Namespace)
+		err = syncer.AddSecretSyncer(ctx, virtManager, hostManager, cluster.Name, cluster.Namespace, nil)
 		Expect(err).NotTo(HaveOccurred())
 	})
 

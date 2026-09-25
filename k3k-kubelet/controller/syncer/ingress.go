@@ -5,13 +5,16 @@ import (
 
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	networkingv1 "k8s.io/api/networking/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -29,7 +32,7 @@ type IngressReconciler struct {
 }
 
 // AddIngressSyncer adds ingress syncer controller to the manager of the virtual cluster
-func AddIngressSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string) error {
+func AddIngressSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, recorder record.EventRecorder) error {
 	reconciler := IngressReconciler{
 		SyncerContext: &SyncerContext{
 			ClusterName:      clusterName,
@@ -40,6 +43,7 @@ func AddIngressSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clu
 				ClusterName:      clusterName,
 				ClusterNamespace: clusterNamespace,
 			},
+			Recorder: recorder,
 		},
 	}
 
@@ -47,8 +51,10 @@ func AddIngressSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clu
 
 	return ctrl.NewControllerManagedBy(virtMgr).
 		Named(name).
-		For(&networkingv1.Ingress{}).
-		WithEventFilter(predicate.NewPredicateFuncs(reconciler.filterResources)).
+		For(&networkingv1.Ingress{}, builder.WithPredicates(predicate.NewPredicateFuncs(reconciler.filterResources))).
+		// host-side changes (a deleted or changed copy) map back to the virtual object
+		WatchesRawSource(source.Kind(hostMgr.GetCache(), ctrlruntimeclient.Object(&networkingv1.Ingress{}),
+			handler.EnqueueRequestsFromMapFunc(reconciler.mapHostToVirtual))).
 		Complete(&reconciler)
 }
 
@@ -128,28 +134,19 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		return reconcile.Result{}, nil
 	}
 
-	// Add finalizer if it does not exist
+	// host events reach the reconciler without the virtual-side filter
+	if !r.filterResources(&virtIngress) {
+		return reconcile.Result{}, nil
+	}
 
+	// Add finalizer if it does not exist
 	if controllerutil.AddFinalizer(&virtIngress, ingressFinalizerName) {
 		if err := r.VirtualClient.Update(ctx, &virtIngress); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
 
-	// create or update the ingress on host
-	var hostIngress networkingv1.Ingress
-	if err := r.HostClient.Get(ctx, types.NamespacedName{Name: syncedIngress.Name, Namespace: r.ClusterNamespace}, &hostIngress); err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Info("creating the ingress for the first time on the host cluster")
-			return reconcile.Result{}, r.HostClient.Create(ctx, syncedIngress)
-		}
-
-		return reconcile.Result{}, err
-	}
-
-	log.Info("updating ingress on the host cluster")
-
-	return reconcile.Result{}, r.HostClient.Update(ctx, syncedIngress)
+	return reconcile.Result{}, r.writeHostCopy(ctx, &virtIngress, syncedIngress, &networkingv1.Ingress{})
 }
 
 func (s *IngressReconciler) ingress(obj *networkingv1.Ingress, disableTLSSecretTranslation bool) *networkingv1.Ingress {

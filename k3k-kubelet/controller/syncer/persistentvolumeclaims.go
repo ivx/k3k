@@ -5,6 +5,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/component-helpers/storage/volume"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -32,7 +33,7 @@ type PVCReconciler struct {
 }
 
 // AddPVCSyncer adds persistentvolumeclaims syncer controller to k3k-kubelet
-func AddPVCSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string) error {
+func AddPVCSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, recorder record.EventRecorder) error {
 	reconciler := PVCReconciler{
 		SyncerContext: &SyncerContext{
 			ClusterName:      clusterName,
@@ -43,6 +44,7 @@ func AddPVCSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, cluster
 				ClusterName:      clusterName,
 				ClusterNamespace: clusterNamespace,
 			},
+			Recorder: recorder,
 		},
 	}
 
@@ -148,7 +150,7 @@ func (r *PVCReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 	// note that we dont need to update the PVC on the host cluster, only syncing the PVC to allow being
 	// handled by the host cluster.
 	if err := r.HostClient.Create(ctx, syncedPVC); err != nil && !apierrors.IsAlreadyExists(err) {
-		return reconcile.Result{}, err
+		return reconcile.Result{}, r.syncFailed(&virtPVC, "create", err)
 	}
 
 	// Creating a virtual PV to bound the existing PVC in the virtual cluster - needed for scheduling of

@@ -5,11 +5,15 @@ import (
 
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,7 +38,7 @@ func (s *SecretSyncer) Name() string {
 }
 
 // AddSecretSyncer adds secret syncer controller to the manager of the virtual cluster
-func AddSecretSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string) error {
+func AddSecretSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, recorder record.EventRecorder) error {
 	reconciler := SecretSyncer{
 		SyncerContext: &SyncerContext{
 			VirtualClient: virtMgr.GetClient(),
@@ -45,6 +49,7 @@ func AddSecretSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clus
 			},
 			ClusterName:      clusterName,
 			ClusterNamespace: clusterNamespace,
+			Recorder:         recorder,
 		},
 	}
 
@@ -52,7 +57,10 @@ func AddSecretSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clus
 
 	return ctrl.NewControllerManagedBy(virtMgr).
 		Named(name).
-		For(&corev1.Secret{}).WithEventFilter(predicate.NewPredicateFuncs(reconciler.filterResources)).
+		For(&corev1.Secret{}, builder.WithPredicates(predicate.NewPredicateFuncs(reconciler.filterResources))).
+		// host-side changes (a deleted or changed copy) map back to the virtual object
+		WatchesRawSource(source.Kind(hostMgr.GetCache(), client.Object(&corev1.Secret{}),
+			handler.EnqueueRequestsFromMapFunc(reconciler.mapHostToVirtual))).
 		Complete(&reconciler)
 }
 
@@ -121,6 +129,11 @@ func (s *SecretSyncer) Reconcile(ctx context.Context, req reconcile.Request) (re
 		return reconcile.Result{}, nil
 	}
 
+	// host events reach the reconciler without the virtual-side filter
+	if !s.filterResources(&virtualSecret) {
+		return reconcile.Result{}, nil
+	}
+
 	// Add finalizer if it does not exist
 	if controllerutil.AddFinalizer(&virtualSecret, secretFinalizerName) {
 		if err := s.VirtualClient.Update(ctx, &virtualSecret); err != nil {
@@ -128,20 +141,7 @@ func (s *SecretSyncer) Reconcile(ctx context.Context, req reconcile.Request) (re
 		}
 	}
 
-	var hostSecret corev1.Secret
-	if err := s.HostClient.Get(ctx, types.NamespacedName{Name: syncedSecret.Name, Namespace: syncedSecret.Namespace}, &hostSecret); err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Info("creating the Secret for the first time on the host cluster")
-			return reconcile.Result{}, s.HostClient.Create(ctx, syncedSecret)
-		}
-
-		return reconcile.Result{}, err
-	}
-
-	// TODO: Add option to keep labels/annotation set by the host cluster
-	log.Info("updating Secret on the host cluster")
-
-	return reconcile.Result{}, s.HostClient.Update(ctx, syncedSecret)
+	return reconcile.Result{}, s.writeHostCopy(ctx, &virtualSecret, syncedSecret, &corev1.Secret{})
 }
 
 // translateSecret will translate a given secret created in the virtual cluster and

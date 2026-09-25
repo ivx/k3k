@@ -320,29 +320,29 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 		return err
 	}
 
-	if err := syncer.AddConfigMapSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+	if err := syncer.AddConfigMapSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
 		return fmt.Errorf("failed to add configmap global syncer: %w", err)
 	}
 
-	if err := syncer.AddSecretSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+	if err := syncer.AddSecretSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
 		return fmt.Errorf("failed to add secret global syncer: %w", err)
 	}
 
 	logger.Info("adding service syncer controller")
 
-	if err := syncer.AddServiceSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+	if err := syncer.AddServiceSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
 		return fmt.Errorf("failed to add service syncer controller: %w", err)
 	}
 
 	logger.Info("adding ingress syncer controller")
 
-	if err := syncer.AddIngressSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+	if err := syncer.AddIngressSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
 		return fmt.Errorf("failed to add ingress syncer controller: %w", err)
 	}
 
 	logger.Info("adding pvc syncer controller")
 
-	if err := syncer.AddPVCSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+	if err := syncer.AddPVCSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
 		return fmt.Errorf("failed to add pvc syncer controller: %w", err)
 	}
 
@@ -372,6 +372,12 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 
 	if err := syncer.AddEventSyncer(ctx, virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace, virtEventRecorder); err != nil {
 		return fmt.Errorf("failed to add event syncer controller: %w", err)
+	}
+
+	// host copies whose virtual object is gone (datastore reset, missed
+	// deletes) are removed at start and periodically
+	if err := syncer.AddOrphanSweeper(virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+		return fmt.Errorf("failed to add orphan sweeper: %w", err)
 	}
 
 	if c.MirrorHostNodes {

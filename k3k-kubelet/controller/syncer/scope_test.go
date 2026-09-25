@@ -267,9 +267,9 @@ func TestRejectRemovesHostCopyAndRecordsEvent(t *testing.T) {
 			ClusterNamespace: "host-ns",
 			HostClient:       hostClient,
 			Translator:       translator,
+			Recorder:         recorder,
 		},
-		GVK:      gvk,
-		Recorder: recorder,
+		GVK: gvk,
 	}
 
 	virtObj := &unstructured.Unstructured{}

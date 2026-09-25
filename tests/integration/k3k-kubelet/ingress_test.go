@@ -56,9 +56,9 @@ var IngressTests = func() {
 		err = hostTestEnv.k8sClient.Create(ctx, &cluster)
 		Expect(err).NotTo(HaveOccurred())
 
-		err = syncer.AddIngressSyncer(ctx, virtManager, hostManager, cluster.Name, cluster.Namespace)
+		err = syncer.AddIngressSyncer(ctx, virtManager, hostManager, cluster.Name, cluster.Namespace, nil)
 		Expect(err).NotTo(HaveOccurred())
-		err = syncer.AddSecretSyncer(ctx, virtManager, hostManager, cluster.Name, cluster.Namespace)
+		err = syncer.AddSecretSyncer(ctx, virtManager, hostManager, cluster.Name, cluster.Namespace, nil)
 		Expect(err).NotTo(HaveOccurred())
 	})
 

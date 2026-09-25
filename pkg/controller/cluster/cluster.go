@@ -902,6 +902,10 @@ func (c *ClusterReconciler) server(ctx context.Context, cluster *v1beta1.Cluster
 	// Add the finalizer to the StatefulSet so the statefulset controller can handle cleanup.
 	controllerutil.AddFinalizer(expectedServerStatefulSet, etcdPodFinalizerName)
 
+	if recreating, err := c.recreateServerStatefulSetIfImmutableChanged(ctx, expectedServerStatefulSet); err != nil || recreating {
+		return err
+	}
+
 	currentServerStatefulSet := expectedServerStatefulSet.DeepCopy()
 	result, err := controllerutil.CreateOrUpdate(ctx, c.Client, currentServerStatefulSet, func() error {
 		if err := controllerutil.SetControllerReference(cluster, currentServerStatefulSet, c.Client.Scheme()); err != nil {
@@ -919,6 +923,42 @@ func (c *ClusterReconciler) server(ctx context.Context, cluster *v1beta1.Cluster
 	}
 
 	return err
+}
+
+// errServerStatefulSetRecreating requeues the Cluster while the server
+// StatefulSet of an earlier version is deleted to be created again.
+var errServerStatefulSetRecreating = errors.New("server StatefulSet is being recreated")
+
+// recreateServerStatefulSetIfImmutableChanged deletes the server StatefulSet,
+// without its pods, when an immutable field (podManagementPolicy) differs from
+// the expected one. The pods keep running; the StatefulSet created next adopts
+// them (same selector and template), and the StatefulSet controller adds the
+// etcd pod finalizers again. It returns true while the old StatefulSet exists.
+func (c *ClusterReconciler) recreateServerStatefulSetIfImmutableChanged(ctx context.Context, expected *appsv1.StatefulSet) (bool, error) {
+	var current appsv1.StatefulSet
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(expected), &current); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+
+	if !current.DeletionTimestamp.IsZero() {
+		return true, errServerStatefulSetRecreating
+	}
+
+	if current.Spec.PodManagementPolicy == expected.Spec.PodManagementPolicy {
+		return false, nil
+	}
+
+	ctrl.LoggerFrom(ctx).Info("Recreating the server StatefulSet (pods are kept) to change podManagementPolicy",
+		"from", current.Spec.PodManagementPolicy, "to", expected.Spec.PodManagementPolicy)
+
+	uid := current.UID
+	if err := c.Client.Delete(ctx, &current,
+		client.PropagationPolicy(metav1.DeletePropagationOrphan),
+		client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+		return true, err
+	}
+
+	return true, errServerStatefulSetRecreating
 }
 
 // kubeletCRDClusterRole grants the shared agents read access to host CRDs, so a

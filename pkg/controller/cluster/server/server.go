@@ -419,7 +419,14 @@ func (s *Server) StatefulServer(ctx context.Context) (*appsv1.StatefulSet, error
 		Spec: appsv1.StatefulSetSpec{
 			Replicas:    &replicas,
 			ServiceName: headlessServiceName(s.cluster.Name),
-			Selector:    &selector,
+			// All servers start together. With OrderedReady the StatefulSet only
+			// creates server-1 once server-0 is Ready, but after a restart of all
+			// servers server-0 can only become Ready (etcd-aware readiness) with a
+			// quorum, which needs server-1: the cluster never comes back. Rolling
+			// updates are not affected: they replace one pod at a time and wait
+			// for it to be Ready with either policy.
+			PodManagementPolicy: appsv1.ParallelPodManagement,
+			Selector:            &selector,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: selector.MatchLabels,

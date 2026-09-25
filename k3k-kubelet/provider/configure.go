@@ -24,13 +24,7 @@ func ConfigureNode(logger logr.Logger, node *corev1.Node, hostname string, servi
 			return err
 		}
 
-		node.Spec = *hostNode.Spec.DeepCopy()
-		node.Status = *hostNode.Status.DeepCopy()
-		node.Labels = hostNode.GetLabels()
-		node.Annotations = hostNode.GetAnnotations()
-		node.Finalizers = hostNode.GetFinalizers()
-		node.Status.DaemonEndpoints.KubeletEndpoint.Port = int32(servicePort)
-		node.Status.NodeInfo.KubeletVersion = version
+		mirrorNode(node, &hostNode, servicePort, version)
 	} else {
 		node.Status.Conditions = nodeConditions()
 		node.Status.DaemonEndpoints.KubeletEndpoint.Port = int32(servicePort)
@@ -101,4 +95,23 @@ func nodeConditions() []corev1.NodeCondition {
 			Message:            "RouteController created a route",
 		},
 	}
+}
+
+// mirrorNode makes node a copy of hostNode for a virtual cluster with
+// mirrorHostNodes: spec, status, labels, annotations and finalizers of the
+// host node, with the kubelet endpoint and version of the virtual kubelet.
+func mirrorNode(node, hostNode *corev1.Node, servicePort int, version string) {
+	node.Spec = *hostNode.Spec.DeepCopy()
+	// The pod CIDRs of the host node are outside the cluster CIDR of the
+	// virtual cluster: its kube-controller-manager (node IPAM) refuses to
+	// start with such a node and every server restart fails. Leave them
+	// empty, so that the virtual cluster allocates its own.
+	node.Spec.PodCIDR = ""
+	node.Spec.PodCIDRs = nil
+	node.Status = *hostNode.Status.DeepCopy()
+	node.Labels = hostNode.GetLabels()
+	node.Annotations = hostNode.GetAnnotations()
+	node.Finalizers = hostNode.GetFinalizers()
+	node.Status.DaemonEndpoints.KubeletEndpoint.Port = int32(servicePort)
+	node.Status.NodeInfo.KubeletVersion = version
 }

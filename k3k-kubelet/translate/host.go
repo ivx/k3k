@@ -30,6 +30,11 @@ const (
 	// ResourceNamespaceAnnotation is the key for the annotation that contains the original namespace of this
 	// resource in the virtual cluster
 	ResourceNamespaceAnnotation = MetadataPrefix + "namespace"
+	// VirtualUIDAnnotation is the key for the annotation that contains the UID of the virtual
+	// object a host copy was made for. Host Pod names are derived from the virtual name only, so
+	// two incarnations of a virtual Pod (e.g. a StatefulSet Pod) map to the same host name; the
+	// UID tells the incarnations apart.
+	VirtualUIDAnnotation = MetadataPrefix + "virtualUID"
 	// MetadataNameField is the downwardapi field for object's name
 	MetadataNameField = "metadata.name"
 	// MetadataNamespaceField is the downward field for the object's namespace

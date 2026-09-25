@@ -64,12 +64,16 @@ type Provider struct {
 	serverIP         string
 	dnsIP            string
 	agentHostname    string
-	logger           logr.Logger
+	// mirrorHostNodes is true when the virtual nodes mirror the host nodes. The virtual
+	// scheduler then places Pods on real (mirrored) nodes, and the host copy is pinned to the
+	// host node of this agent (see configureScheduling).
+	mirrorHostNodes bool
+	logger          logr.Logger
 }
 
 var ErrRetryTimeout = errors.New("provider timed out")
 
-func New(hostConfig rest.Config, hostMgr, virtualMgr manager.Manager, logger logr.Logger, namespace, name, serverIP, dnsIP, agentHostname string) (*Provider, error) {
+func New(hostConfig rest.Config, hostMgr, virtualMgr manager.Manager, logger logr.Logger, namespace, name, serverIP, dnsIP, agentHostname string, mirrorHostNodes bool) (*Provider, error) {
 	coreClient, err := cv1.NewForConfig(&hostConfig)
 	if err != nil {
 		return nil, err
@@ -104,6 +108,7 @@ func New(hostConfig rest.Config, hostMgr, virtualMgr manager.Manager, logger log
 		serverIP:         serverIP,
 		dnsIP:            dnsIP,
 		agentHostname:    agentHostname,
+		mirrorHostNodes:  mirrorHostNodes,
 	}
 
 	return &p, nil
@@ -417,29 +422,13 @@ func (p *Provider) createPod(ctx context.Context, pod *corev1.Pod) error {
 	// (e.g. PodDisruptionBudgets) can be scoped to the Pods of their original namespace
 	hostPod.Labels[translate.NamespaceNameLabel] = virtualPod.Namespace
 
+	// record the virtual Pod incarnation, so that a delete of an older incarnation with the
+	// same name cannot remove this copy (see deletePod)
+	hostPod.Annotations[translate.VirtualUIDAnnotation] = string(virtualPod.UID)
+
 	logger = logger.WithValues("pod", hostPod.Name)
 
-	// Clear the NodeName to allow scheduling, and set affinity to prefer scheduling the Pod on the same host node as the virtual kubelet,
-	// unless the user has specified their own affinity, in which case the user's affinity is respected.
-
-	hostPod.Spec.NodeName = ""
-
-	if hostPod.Spec.Affinity == nil {
-		hostPod.Spec.Affinity = &corev1.Affinity{
-			NodeAffinity: &corev1.NodeAffinity{
-				PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{{
-					Weight: 100,
-					Preference: corev1.NodeSelectorTerm{
-						MatchExpressions: []corev1.NodeSelectorRequirement{{
-							Key:      "kubernetes.io/hostname",
-							Operator: corev1.NodeSelectorOpIn,
-							Values:   []string{p.agentHostname},
-						}},
-					},
-				}},
-			},
-		}
-	}
+	p.configureScheduling(hostPod)
 
 	// The pod's own nodeSelector is ignored.
 	// The final selector is determined by the cluster spec, but overridden by a policy if present.
@@ -518,6 +507,63 @@ func (p *Provider) createPod(ctx context.Context, pod *corev1.Pod) error {
 	logger.Info("Pod created on host cluster")
 
 	return nil
+}
+
+// configureScheduling sets the scheduling constraints of the host Pod. The NodeName of the
+// virtual Pod is always cleared, so that the host scheduler places the Pod and still runs its
+// resource and taint checks.
+//
+// Without mirrorHostNodes the virtual nodes do not exist on the host, so the host scheduler makes
+// the placement decision with the Pod's own constraints. The Pod only gets a preferred affinity to
+// the host node of this agent, and only if it does not have an affinity of its own.
+//
+// With mirrorHostNodes the virtual scheduler already made the placement decision on the mirrored
+// nodes (same names, labels, taints and cordons as the host nodes), with the correct semantics.
+// The host Pod is pinned to that decision with a required node affinity to the host node of this
+// agent. A mismatch shows as a Pending host Pod with a FailedScheduling event, not as a Pod on a
+// different node than the virtual cluster shows. The Pod's own nodeAffinity, podAffinity,
+// podAntiAffinity and topologySpreadConstraints are dropped: all virtual namespaces collapse into
+// one host namespace, so their label selectors would count the Pods of all virtual namespaces and
+// could contradict the virtual decision (Pending) or change the placement. The nodeSelector and the
+// tolerations are handled as without mirrorHostNodes.
+func (p *Provider) configureScheduling(hostPod *corev1.Pod) {
+	hostPod.Spec.NodeName = ""
+
+	if p.mirrorHostNodes {
+		hostPod.Spec.Affinity = &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      corev1.LabelHostname,
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{p.agentHostname},
+						}},
+					}},
+				},
+			},
+		}
+		hostPod.Spec.TopologySpreadConstraints = nil
+
+		return
+	}
+
+	if hostPod.Spec.Affinity == nil {
+		hostPod.Spec.Affinity = &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{{
+					Weight: 100,
+					Preference: corev1.NodeSelectorTerm{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      corev1.LabelHostname,
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{p.agentHostname},
+						}},
+					},
+				}},
+			},
+		}
+	}
 }
 
 // withRetry retries passed function with interval and timeout
@@ -740,21 +786,68 @@ func (p *Provider) deletePod(ctx context.Context, pod *corev1.Pod) error {
 	logger := p.logger.WithValues("namespace", pod.Namespace, "name", pod.Name, "pod", hostPodName)
 	logger.V(1).Info("DeletePod")
 
-	err := p.Host.CoreClient.Pods(p.ClusterNamespace).Delete(ctx, hostPodName, metav1.DeleteOptions{})
+	// The host Pod name is derived from the virtual name only, so the name can point to a newer
+	// incarnation of the Pod that another agent (or this agent, for a newer virtual Pod) created.
+	// Read the current host Pod from the API server (not the cache), check that it is the copy
+	// this delete is for, and delete exactly that object with a UID precondition.
+	hostPod, err := p.Host.CoreClient.Pods(p.ClusterNamespace).Get(ctx, hostPodName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			logger.Info("Pod to delete not found in host cluster")
 			return nil
 		}
 
-		logger.Error(err, "Error trying to delete pod from host cluster")
+		logger.Error(err, "Error trying to get pod to delete from host cluster")
 
 		return err
 	}
 
-	logger.Info("Pod deleted from host cluster")
+	if owned, reason := p.ownsHostPod(pod, hostPod); !owned {
+		logger.Info("Skipping delete of host pod that belongs to another pod incarnation", "reason", reason, "hostPodUID", hostPod.UID)
+		return nil
+	}
+
+	uid := hostPod.UID
+
+	err = p.Host.CoreClient.Pods(p.ClusterNamespace).Delete(ctx, hostPodName, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("Pod to delete not found in host cluster")
+			return nil
+		}
+
+		// a Conflict means the host Pod was replaced after the read: the retry reads it again
+		logger.Error(err, "Error trying to delete pod from host cluster", "hostPodUID", uid)
+
+		return err
+	}
+
+	logger.Info("Pod deleted from host cluster", "hostPodUID", uid)
 
 	return nil
+}
+
+// ownsHostPod reports whether hostPod is the host copy that this agent made for the virtual Pod
+// pod. If not, it returns the reason. A host Pod without the agent label or the virtual UID
+// annotation (made by an older k3k-kubelet) passes the missing check. The virtual UID is only
+// compared if pod carries a UID: the Pods that virtual-kubelet gets back from GetPod and GetPods
+// are translated host Pods without one.
+func (p *Provider) ownsHostPod(pod, hostPod *corev1.Pod) (bool, string) {
+	if agent := hostPod.Labels[translate.AgentNameLabel]; agent != "" && agent != p.agentHostname {
+		return false, fmt.Sprintf("host pod was synced by agent %q", agent)
+	}
+
+	if pod.UID == "" {
+		return true, ""
+	}
+
+	if uid := hostPod.Annotations[translate.VirtualUIDAnnotation]; uid != "" && uid != string(pod.UID) {
+		return false, fmt.Sprintf("host pod was made for virtual pod UID %q, not %q", uid, pod.UID)
+	}
+
+	return true, ""
 }
 
 // GetPod retrieves a pod by name from the provider (can be cached).

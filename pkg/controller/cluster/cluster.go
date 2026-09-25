@@ -1104,6 +1104,20 @@ func (c *ClusterReconciler) validate(cluster *v1beta1.Cluster, policy *v1beta1.V
 // lookupServiceCIDR attempts to determine the cluster's service CIDR.
 // It first attempts to create a failing Service (with an invalid cluster IP)and extracts the expected CIDR from the resulting error.
 // If that fails, it searches the 'kube-apiserver' Pod's arguments for the --service-cluster-ip-range flag.
+// primaryServiceCIDR returns the first (primary family) range of a service
+// CIDR list. Dual-stack hosts report both families, for example
+// "10.197.0.0/16,fd42:0:1a:ffff::/112"; the list as a whole is not a CIDR.
+func primaryServiceCIDR(serviceCIDRs string) (string, error) {
+	first := strings.TrimSpace(strings.Split(serviceCIDRs, ",")[0])
+
+	_, serviceCIDRAddr, err := net.ParseCIDR(first)
+	if err != nil {
+		return "", err
+	}
+
+	return serviceCIDRAddr.String(), nil
+}
+
 func (c *ClusterReconciler) lookupServiceCIDR(ctx context.Context) (string, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -1124,13 +1138,7 @@ func (c *ClusterReconciler) lookupServiceCIDR(ctx context.Context) (string, erro
 			serviceCIDR := strings.TrimSpace(splittedErrMsg[1])
 			log.V(1).Info("Found Service CIDR from failing service creation: " + serviceCIDR)
 
-			// validate serviceCIDR
-			_, serviceCIDRAddr, err := net.ParseCIDR(serviceCIDR)
-			if err != nil {
-				return "", err
-			}
-
-			return serviceCIDRAddr.String(), nil
+			return primaryServiceCIDR(serviceCIDR)
 		}
 	}
 
@@ -1161,14 +1169,13 @@ func (c *ClusterReconciler) lookupServiceCIDR(ctx context.Context) (string, erro
 				serviceCIDR := strings.TrimPrefix(arg, "--service-cluster-ip-range=")
 				log.V(1).Info("Found Service CIDR from kube-apiserver pod: " + serviceCIDR)
 
-				// validate serviceCIDR
-				_, serviceCIDRAddr, err := net.ParseCIDR(serviceCIDR)
+				primary, err := primaryServiceCIDR(serviceCIDR)
 				if err != nil {
 					log.Error(err, "Service CIDR is not valid")
 					break
 				}
 
-				return serviceCIDRAddr.String(), nil
+				return primary, nil
 			}
 		}
 	}

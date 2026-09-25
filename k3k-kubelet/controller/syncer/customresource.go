@@ -276,7 +276,12 @@ func (r *CustomResourceReconciler) Reconcile(ctx context.Context, req reconcile.
 	if err := r.HostClient.Get(ctx, ctrlruntimeclient.ObjectKeyFromObject(hostObj), &existing); err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("creating the custom resource for the first time on the host cluster")
-			return reconcile.Result{}, r.HostClient.Create(ctx, hostObj)
+
+			if err := r.HostClient.Create(ctx, hostObj); err != nil {
+				return reconcile.Result{}, r.syncFailed(virtObj, "create", err)
+			}
+
+			return reconcile.Result{}, nil
 		}
 
 		return reconcile.Result{}, err
@@ -297,7 +302,11 @@ func (r *CustomResourceReconciler) Reconcile(ctx context.Context, req reconcile.
 		}
 
 		if err := r.HostClient.Update(ctx, &existing); err != nil {
-			return reconcile.Result{}, err
+			if apierrors.IsConflict(err) {
+				return reconcile.Result{}, err
+			}
+
+			return reconcile.Result{}, r.syncFailed(virtObj, "update", err)
 		}
 	}
 
@@ -341,6 +350,12 @@ func (r *CustomResourceReconciler) translated(ctx context.Context, virtObj *unst
 
 	if err := checkRejects(hostObj.Object, cfg.Rejects); err != nil {
 		return nil, err
+	}
+
+	if r.GVK == podDisruptionBudgetGVK {
+		if err := translatePodDisruptionBudget(virtObj, hostObj); err != nil {
+			return nil, err
+		}
 	}
 
 	stampSpecHash(hostObj)

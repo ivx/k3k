@@ -23,6 +23,7 @@ type serverConfig struct {
 	Disable            []string `yaml:"disable,omitempty"`
 	EgressSelectorMode string   `yaml:"egress-selector-mode,omitempty"`
 	KubeApiServerArg   []string `yaml:"kube-apiserver-arg,omitempty"`
+	KubeCMArg          []string `yaml:"kube-controller-manager-arg,omitempty"`
 	Server             string   `yaml:"server,omitempty"`
 	ServiceCIDR        string   `yaml:"service-cidr,omitempty"`
 	TLSSAN             []string `yaml:"tls-san,omitempty"`
@@ -83,6 +84,13 @@ func buildServerConfig(cluster *v1beta1.Cluster, initServer bool, serviceIP, tok
 		serverConfig.DisableAgent = true
 		serverConfig.EgressSelectorMode = "disabled"
 		serverConfig.Disable = []string{"servicelb", "traefik", "metrics-server", "local-storage"}
+		// Pods of a shared cluster get host pod IPs; the pod CIDRs of the
+		// virtual nodes are never used. Node IPAM also refuses to start when a
+		// node carries a pod CIDR outside the cluster CIDR (mirrored host
+		// nodes registered by older kubelets), which failed every server
+		// restart. The config secret changes without a server roll; the
+		// argument applies at the next server start.
+		serverConfig.KubeCMArg = append(serverConfig.KubeCMArg, "allocate-node-cidrs=false")
 	case v1beta1.HCPClusterMode:
 		serverConfig.DisableAgent = true
 		// Tunnel apiserver egress through the k3s-agent WebSocket: the

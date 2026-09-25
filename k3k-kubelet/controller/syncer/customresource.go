@@ -341,6 +341,15 @@ func (r *CustomResourceReconciler) translated(ctx context.Context, virtObj *unst
 		return nil, err
 	}
 
+	// Names of other virtual objects (Secrets, ConfigMaps, PVCs) point to
+	// their host copies.
+	virtNamespace := virtObj.GetNamespace()
+	toHost := func(name string) string { return r.Translator.TranslateName(virtNamespace, name) }
+
+	if err := translateReferences(hostObj.Object, cfg.References, toHost); err != nil {
+		return nil, err
+	}
+
 	// Scope selectors to this virtual cluster and refuse fields that would
 	// widen what the object can reach. Both run on the translated object so
 	// that they also cover values introduced by patches.

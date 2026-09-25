@@ -455,6 +455,11 @@ func (in *CustomResourceSyncConfig) DeepCopyInto(out *CustomResourceSyncConfig) 
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.References != nil {
+		in, out := &in.References, &out.References
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Rejects != nil {
 		in, out := &in.Rejects, &out.Rejects
 		*out = make([]CustomResourceReject, len(*in))

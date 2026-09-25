@@ -370,6 +370,18 @@ type CustomResourceSyncConfig struct {
 	// +optional
 	Selectors []string `json:"selectors,omitempty"`
 
+	// References lists JSON-pointer paths to string values that name other
+	// objects in the same virtual namespace, for example
+	// /spec/template/spec/volumes/*/persistentVolumeClaim/claimName or
+	// /spec/template/spec/volumes/*/cloudInitNoCloud/secretRef/name. A "*"
+	// segment matches every list item or map value. On the way down each
+	// name is translated like the host copy of the named object, so that
+	// the host operator finds the synced Secret, ConfigMap, PVC or other
+	// object. The named object must reach the host by its own sync.
+	//
+	// +optional
+	References []string `json:"references,omitempty"`
+
 	// Rejects lists fields a synced object may not set. Any non-empty
 	// value at a listed path blocks the sync, unless the value is a list
 	// whose items are all in Allow. A rejected object gets a Warning event

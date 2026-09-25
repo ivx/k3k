@@ -254,6 +254,61 @@ func allowed(node any, allow []string) bool {
 	return true
 }
 
+// translateReferences rewrites every object name found at the configured
+// paths to the name of that object's host copy (same rule as the syncers).
+// Non-string values and missing paths are left alone.
+func translateReferences(root map[string]any, paths []string, translate func(name string) string) error {
+	for _, path := range paths {
+		i := strings.LastIndex(path, "/")
+		if i < 0 {
+			return fmt.Errorf("reference path %q: must start with /", path)
+		}
+
+		leaf := strings.ReplaceAll(strings.ReplaceAll(path[i+1:], "~1", "/"), "~0", "~")
+
+		var parents []any
+
+		if i == 0 {
+			parents = []any{root}
+		} else {
+			var err error
+
+			if parents, err = findNodes(root, path[:i]); err != nil {
+				return fmt.Errorf("reference path %q: %w", path, err)
+			}
+		}
+
+		for _, parent := range parents {
+			switch p := parent.(type) {
+			case map[string]any:
+				for key, value := range p {
+					if leaf != "*" && key != leaf {
+						continue
+					}
+
+					if name, ok := value.(string); ok && name != "" {
+						p[key] = translate(name)
+					}
+				}
+			case []any:
+				for idx, value := range p {
+					if leaf != "*" {
+						if want, err := parseIndex(leaf, len(p)); err != nil || want != idx {
+							continue
+						}
+					}
+
+					if name, ok := value.(string); ok && name != "" {
+						p[idx] = translate(name)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // findNodes returns every value addressed by a JSON-pointer path in which a
 // "*" segment matches all items of a list or all values of a map. Missing
 // segments match nothing; they are not an error.

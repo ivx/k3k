@@ -301,6 +301,40 @@ func TestEventSyncerReconcileNotFound(t *testing.T) {
 	assert.Empty(t, recorder.events)
 }
 
+// An event of a host Pod that is already gone is dropped, not requeued.
+func TestEventSyncerReconcileHostPodGone(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	event := &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "pod-gone.1", Namespace: "host-ns"},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "pod-gone", Namespace: "host-ns"},
+		Reason:         "FailedScheduling",
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(event).Build()
+	recorder := &fakeEventRecorder{}
+
+	syncer := &EventSyncer{
+		virtEventRecorder: recorder,
+		SyncerContext: &SyncerContext{
+			HostClient:       fakeClient,
+			VirtualClient:    fakeClient,
+			Translator:       translate.ToHostTranslator{ClusterName: "mycluster", ClusterNamespace: "host-ns"},
+			ClusterName:      "mycluster",
+			ClusterNamespace: "host-ns",
+		},
+	}
+
+	result, err := syncer.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "pod-gone.1", Namespace: "host-ns"},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, reconcile.Result{}, result)
+	assert.Empty(t, recorder.events)
+}
+
 // This fake is used instead of the one in the client-go package because we need to check that the events are sent to the correct namespace.
 //
 // The client-go fake doesn't support namespaces, so we implement our own that captures the events in memory for verification.

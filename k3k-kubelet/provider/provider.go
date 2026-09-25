@@ -520,7 +520,7 @@ func (p *Provider) createPod(ctx context.Context, pod *corev1.Pod) error {
 // With mirrorHostNodes the virtual scheduler already made the placement decision on the mirrored
 // nodes (same names, labels, taints and cordons as the host nodes), with the correct semantics.
 // The host Pod is pinned to that decision with a required node affinity to the host node of this
-// agent. A mismatch shows as a Pending host Pod with a FailedScheduling event, not as a Pod on a
+// agent (the agent Pod's spec.nodeName). A mismatch shows as a Pending host Pod with a FailedScheduling event, not as a Pod on a
 // different node than the virtual cluster shows. The Pod's own nodeAffinity, podAffinity,
 // podAntiAffinity and topologySpreadConstraints are dropped: all virtual namespaces collapse into
 // one host namespace, so their label selectors would count the Pods of all virtual namespaces and
@@ -532,10 +532,13 @@ func (p *Provider) configureScheduling(hostPod *corev1.Pod) {
 	if p.mirrorHostNodes {
 		hostPod.Spec.Affinity = &corev1.Affinity{
 			NodeAffinity: &corev1.NodeAffinity{
+				// match the node name itself (as the DaemonSet controller does), not the
+				// hostname label: a required rule on a label that differs from the node
+				// name would leave the Pod Pending for good
 				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-						MatchExpressions: []corev1.NodeSelectorRequirement{{
-							Key:      corev1.LabelHostname,
+						MatchFields: []corev1.NodeSelectorRequirement{{
+							Key:      metav1.ObjectNameField,
 							Operator: corev1.NodeSelectorOpIn,
 							Values:   []string{p.agentHostname},
 						}},

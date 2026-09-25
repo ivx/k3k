@@ -537,8 +537,8 @@ func TestConfigureScheduling(t *testing.T) {
 		NodeAffinity: &corev1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-					MatchExpressions: []corev1.NodeSelectorRequirement{{
-						Key:      "kubernetes.io/hostname",
+					MatchFields: []corev1.NodeSelectorRequirement{{
+						Key:      "metadata.name",
 						Operator: corev1.NodeSelectorOpIn,
 						Values:   []string{agentName},
 					}},

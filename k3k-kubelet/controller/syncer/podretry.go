@@ -83,13 +83,12 @@ func (r *PodRetryReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 
 	now := r.Now()
 
-	// Wait one interval after the last retry, or after the pod start (the
-	// first failure gets the pod controller's own quick retries).
-	var last time.Time
+	// Wait one interval after the last retry, or after the pod creation
+	// (the first failure gets the pod controller's own quick retries; a pod
+	// that never started has no status.startTime).
+	last := pod.CreationTimestamp.Time
 	if t, err := time.Parse(time.RFC3339, pod.Annotations[ProviderRetryAnnotation]); err == nil {
 		last = t
-	} else if pod.Status.StartTime != nil {
-		last = pod.Status.StartTime.Time
 	}
 
 	if wait := last.Add(r.Interval).Sub(now); wait > 0 {

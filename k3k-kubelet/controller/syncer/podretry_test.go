@@ -16,16 +16,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func failedPod(start time.Time, annotations map[string]string) *corev1.Pod {
-	st := metav1.NewTime(start)
-
+func failedPod(created time.Time, annotations map[string]string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "webhook", Namespace: "cattle-system", Annotations: annotations},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "webhook", Namespace: "cattle-system", Annotations: annotations,
+			CreationTimestamp: metav1.NewTime(created),
+		},
 		Status: corev1.PodStatus{
-			Phase:     corev1.PodPending,
-			Reason:    providerFailedReason,
-			Message:   "failed to create the host pod: connection refused",
-			StartTime: &st,
+			Phase:   corev1.PodPending,
+			Reason:  providerFailedReason,
+			Message: "failed to create the host pod: connection refused",
 		},
 	}
 }

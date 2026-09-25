@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/rancher/k3k/k3k-kubelet/controller/syncer"
 	"github.com/rancher/k3k/k3k-kubelet/translate"
 	"github.com/rancher/k3k/pkg/apis/k3k.io/v1beta1"
 	"github.com/rancher/k3k/pkg/controller"
@@ -25,6 +28,13 @@ import (
 const (
 	SharedNodeAgentName = "kubelet"
 	SharedNodeMode      = "shared"
+
+	// SyncKindsHashAnnotation on the kubelet pod template carries a hash of
+	// the custom-resource kinds the kubelet registers syncers for at start
+	// (syncer.SyncedKinds). The kubelet reads that set only once, so a change
+	// of the set must restart it: changing the annotation rolls the
+	// DaemonSet.
+	SyncKindsHashAnnotation = "k3k.io/sync-kinds-hash"
 )
 
 type SharedAgent struct {
@@ -151,7 +161,8 @@ func (s *SharedAgent) daemonset(ctx context.Context) error {
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+					Labels:      labels,
+					Annotations: podTemplateAnnotations(s.cluster),
 				},
 				Spec: s.podSpec(ctx),
 			},
@@ -159,6 +170,32 @@ func (s *SharedAgent) daemonset(ctx context.Context) error {
 	}
 
 	return s.ensureObject(ctx, deploy)
+}
+
+// podTemplateAnnotations returns the kubelet pod template annotations: the
+// sync-kinds hash, only when the set is not empty. Clusters without synced
+// custom-resource kinds keep a template without annotations, so upgrading
+// the controller does not roll their kubelets.
+func podTemplateAnnotations(cluster *v1beta1.Cluster) map[string]string {
+	hash := syncKindsHash(cluster)
+	if hash == "" {
+		return nil
+	}
+
+	return map[string]string{SyncKindsHashAnnotation: hash}
+}
+
+// syncKindsHash hashes the set of custom-resource kinds the kubelet registers
+// at start, or returns "" for an empty set.
+func syncKindsHash(cluster *v1beta1.Cluster) string {
+	kinds := syncer.SyncedKinds(cluster)
+	if len(kinds) == 0 {
+		return ""
+	}
+
+	sum := sha256.Sum256([]byte(strings.Join(kinds, "\n")))
+
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *SharedAgent) podSpec(ctx context.Context) corev1.PodSpec {

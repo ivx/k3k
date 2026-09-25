@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.yaml.in/yaml/v4"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
 	corev1 "k8s.io/api/core/v1"
@@ -730,4 +731,62 @@ func Test_sharedAgentData(t *testing.T) {
 			assert.Equal(t, tt.expectedData, data)
 		})
 	}
+}
+
+func Test_syncKindsHash(t *testing.T) {
+	vm := v1beta1.CustomResourceSyncConfig{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine", Enabled: true}
+	cnp := v1beta1.CustomResourceSyncConfig{APIVersion: "cilium.io/v2", Kind: "CiliumNetworkPolicy", Enabled: true}
+
+	clusterWith := func(pdb bool, entries ...v1beta1.CustomResourceSyncConfig) *v1beta1.Cluster {
+		return &v1beta1.Cluster{Spec: v1beta1.ClusterSpec{Sync: &v1beta1.SyncConfig{
+			PodDisruptionBudgets: v1beta1.PodDisruptionBudgetSyncConfig{Enabled: pdb},
+			CustomResources:      entries,
+		}}}
+	}
+
+	base := syncKindsHash(clusterWith(false, vm, cnp))
+	assert.NotEmpty(t, base)
+
+	t.Run("stable across ordering and duplicates", func(t *testing.T) {
+		assert.Equal(t, base, syncKindsHash(clusterWith(false, cnp, vm)))
+		assert.Equal(t, base, syncKindsHash(clusterWith(false, cnp, vm, cnp)))
+	})
+
+	t.Run("changes when a kind is added or removed", func(t *testing.T) {
+		assert.NotEqual(t, base, syncKindsHash(clusterWith(false, vm)))
+		assert.NotEqual(t, base, syncKindsHash(clusterWith(false, vm, cnp,
+			v1beta1.CustomResourceSyncConfig{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachineInstance", Enabled: true})))
+		// the PodDisruptionBudget alias is a registered kind as well
+		assert.NotEqual(t, base, syncKindsHash(clusterWith(true, vm, cnp)))
+	})
+
+	t.Run("changes when a kind is enabled or disabled", func(t *testing.T) {
+		disabled := cnp
+		disabled.Enabled = false
+
+		assert.Equal(t, syncKindsHash(clusterWith(false, vm)), syncKindsHash(clusterWith(false, vm, disabled)))
+		assert.NotEqual(t, base, syncKindsHash(clusterWith(false, vm, disabled)))
+	})
+
+	t.Run("unchanged on fields read live", func(t *testing.T) {
+		live := cnp
+		live.Selector = map[string]string{"sync": "true"}
+		live.SyncStatus = true
+		live.Selectors = []string{"/spec/endpointSelector"}
+		live.Patches = []v1beta1.CustomResourcePatch{{Op: "add", Path: "/metadata/labels/x", Value: &runtime.RawExtension{Raw: []byte(`"$(VC_NAME)"`)}}}
+		live.Rejects = []v1beta1.CustomResourceReject{{Path: "/spec/egress/*/toEntities"}}
+
+		assert.Equal(t, base, syncKindsHash(clusterWith(false, vm, live)))
+	})
+
+	t.Run("annotation absent for an empty set", func(t *testing.T) {
+		assert.Nil(t, podTemplateAnnotations(&v1beta1.Cluster{}))
+		assert.Nil(t, podTemplateAnnotations(clusterWith(false)))
+
+		disabled := vm
+		disabled.Enabled = false
+		assert.Nil(t, podTemplateAnnotations(clusterWith(false, disabled)))
+
+		assert.Equal(t, map[string]string{SyncKindsHashAnnotation: base}, podTemplateAnnotations(clusterWith(false, vm, cnp)))
+	})
 }

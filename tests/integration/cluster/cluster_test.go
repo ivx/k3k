@@ -19,6 +19,7 @@ import (
 	"github.com/rancher/k3k/k3k-kubelet/translate"
 	"github.com/rancher/k3k/pkg/apis/k3k.io/v1beta1"
 	k3kcontroller "github.com/rancher/k3k/pkg/controller"
+	"github.com/rancher/k3k/pkg/controller/cluster/agent"
 	"github.com/rancher/k3k/pkg/controller/cluster/server"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -618,6 +619,85 @@ var _ = Describe("Cluster Controller", Label("controller"), Label("Cluster"), fu
 					Expect(addonMounts[0].MountPath).To(Equal("/var/lib/rancher/k3s/server/manifests/addon-one"))
 					Expect(addonMounts[1].Name).To(Equal("addon-addon-two"))
 					Expect(addonMounts[1].MountPath).To(Equal("/var/lib/rancher/k3s/server/manifests/addon-two"))
+				})
+			})
+
+			When("changing the synced custom-resource kinds", func() {
+				It("rolls the kubelet DaemonSet through the pod template annotation", func() {
+					cluster := &v1beta1.Cluster{
+						ObjectMeta: metav1.ObjectMeta{
+							GenerateName: "cluster-",
+							Namespace:    namespace,
+						},
+					}
+					Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+					key := client.ObjectKey{
+						Name:      k3kcontroller.SafeConcatNameWithPrefix(cluster.Name, agent.SharedNodeAgentName),
+						Namespace: cluster.Namespace,
+					}
+
+					templateAnnotation := func() (string, error) {
+						var ds appsv1.DaemonSet
+						if err := k8sClient.Get(ctx, key, &ds); err != nil {
+							return "", err
+						}
+
+						return ds.Spec.Template.Annotations[agent.SyncKindsHashAnnotation], nil
+					}
+
+					// no synced kinds: no annotation, so existing clusters keep an
+					// identical template when the controller is upgraded
+					Eventually(templateAnnotation).
+						WithTimeout(time.Second * 30).
+						WithPolling(time.Second).
+						Should(BeEmpty())
+
+					updateSync := func(mutate func(*v1beta1.SyncConfig)) {
+						Eventually(func() error {
+							var current v1beta1.Cluster
+							if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), &current); err != nil {
+								return err
+							}
+
+							mutate(current.Spec.Sync)
+
+							return k8sClient.Update(ctx, &current)
+						}).
+							WithTimeout(time.Second * 10).
+							WithPolling(time.Second).
+							Should(Succeed())
+					}
+
+					updateSync(func(sync *v1beta1.SyncConfig) {
+						sync.CustomResources = append(sync.CustomResources, v1beta1.CustomResourceSyncConfig{
+							APIVersion: "kubevirt.io/v1",
+							Kind:       "VirtualMachine",
+							Enabled:    true,
+						})
+					})
+
+					Eventually(templateAnnotation).
+						WithTimeout(time.Second * 30).
+						WithPolling(time.Second).
+						Should(Not(BeEmpty()))
+
+					first, err := templateAnnotation()
+					Expect(err).To(Not(HaveOccurred()))
+
+					// a second kind changes the hash
+					updateSync(func(sync *v1beta1.SyncConfig) {
+						sync.CustomResources = append(sync.CustomResources, v1beta1.CustomResourceSyncConfig{
+							APIVersion: "cilium.io/v2",
+							Kind:       "CiliumNetworkPolicy",
+							Enabled:    true,
+						})
+					})
+
+					Eventually(templateAnnotation).
+						WithTimeout(time.Second * 30).
+						WithPolling(time.Second).
+						Should(And(Not(BeEmpty()), Not(Equal(first))))
 				})
 			})
 		})

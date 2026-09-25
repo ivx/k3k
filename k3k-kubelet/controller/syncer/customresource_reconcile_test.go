@@ -305,3 +305,33 @@ func TestGenericReconcileIsIdempotentAndKeepsHostDefaults(t *testing.T) {
 	assert.Equal(t, &two, host.Spec.MinAvailable)
 	assert.NotEqual(t, rv2, host.ResourceVersion)
 }
+
+func TestSyncedKinds(t *testing.T) {
+	cluster := &v1beta1.Cluster{Spec: v1beta1.ClusterSpec{Sync: &v1beta1.SyncConfig{
+		PodDisruptionBudgets: v1beta1.PodDisruptionBudgetSyncConfig{Enabled: true},
+		CustomResources: []v1beta1.CustomResourceSyncConfig{
+			{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine", Enabled: true},
+			{APIVersion: "cilium.io/v2", Kind: "CiliumNetworkPolicy", Enabled: true},
+			{APIVersion: "cilium.io/v2", Kind: "CiliumNetworkPolicy", Enabled: true},
+			{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachineInstance", Enabled: false},
+		},
+	}}}
+
+	// sorted, de-duplicated, only the enabled entries (the ones registered
+	// at kubelet start), including the PodDisruptionBudget alias
+	assert.Equal(t, []string{
+		"cilium.io/v2/CiliumNetworkPolicy",
+		"kubevirt.io/v1/VirtualMachine",
+		"policy/v1/PodDisruptionBudget",
+	}, SyncedKinds(cluster))
+
+	startup := StartupCustomResourceEntries(cluster)
+	require.Len(t, startup, 4)
+
+	for _, cfg := range startup {
+		assert.True(t, cfg.Enabled)
+	}
+
+	assert.Empty(t, SyncedKinds(&v1beta1.Cluster{}))
+	assert.Empty(t, SyncedKinds(&v1beta1.Cluster{Spec: v1beta1.ClusterSpec{Sync: &v1beta1.SyncConfig{}}}))
+}

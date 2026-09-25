@@ -57,7 +57,8 @@ type CustomResourceReconciler struct {
 
 // AddCustomResourceSyncers registers one syncer controller per enabled
 // sync.customResources entry. The entry LIST is read once at kubelet start
-// (adding a new type needs a kubelet restart); the enabled flag of a
+// (adding or enabling a type needs a kubelet restart - the controller rolls
+// the kubelet DaemonSet when SyncedKinds changes); the enabled flag of a
 // registered entry is honored live through the reconciler, with deletions
 // still processed for cleanup. Because controller-runtime informers start
 // with a full LIST, pre-existing virtual objects are replayed at startup —
@@ -73,11 +74,7 @@ func AddCustomResourceSyncers(ctx context.Context, virtMgr, hostMgr manager.Mana
 		return fmt.Errorf("customresource syncer: reading cluster: %w", err)
 	}
 
-	for _, cfg := range CustomResourceEntries(&cluster) {
-		if !cfg.Enabled {
-			continue
-		}
-
+	for _, cfg := range StartupCustomResourceEntries(&cluster) {
 		if ready != nil {
 			gv, err := schema.ParseGroupVersion(cfg.APIVersion)
 			if err != nil || !ready[gv.WithKind(cfg.Kind)] {
@@ -126,6 +123,42 @@ func CustomResourceEntries(cluster *v1beta1.Cluster) []v1beta1.CustomResourceSyn
 	}
 
 	return entries
+}
+
+// StartupCustomResourceEntries returns the entries the kubelet registers a
+// syncer (and copies a CRD) for at start: the enabled ones of
+// CustomResourceEntries. This set is fixed for the lifetime of a kubelet
+// process; SyncedKinds summarizes it for the controller, which rolls the
+// kubelet DaemonSet when it changes.
+func StartupCustomResourceEntries(cluster *v1beta1.Cluster) []v1beta1.CustomResourceSyncConfig {
+	var enabled []v1beta1.CustomResourceSyncConfig
+
+	for _, cfg := range CustomResourceEntries(cluster) {
+		if cfg.Enabled {
+			enabled = append(enabled, cfg)
+		}
+	}
+
+	return enabled
+}
+
+// SyncedKinds returns the sorted, de-duplicated "apiVersion/kind" list of
+// StartupCustomResourceEntries. Only this set needs a kubelet restart to take
+// effect: a kind that was absent or disabled at start has no syncer. Every
+// other entry field (selector, patches, rejects, syncStatus) is read live per
+// reconcile and is deliberately not part of it. Disabling a kind shrinks the
+// set as well, so it restarts the kubelet too, which then no longer registers
+// that kind.
+func SyncedKinds(cluster *v1beta1.Cluster) []string {
+	var kinds []string
+
+	for _, cfg := range StartupCustomResourceEntries(cluster) {
+		kinds = append(kinds, cfg.APIVersion+"/"+cfg.Kind)
+	}
+
+	slices.Sort(kinds)
+
+	return slices.Compact(kinds)
 }
 
 func addCustomResourceSyncer(virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, cfg v1beta1.CustomResourceSyncConfig, recorder record.EventRecorder) error {

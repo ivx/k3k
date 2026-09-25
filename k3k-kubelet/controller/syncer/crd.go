@@ -66,7 +66,7 @@ func EnsureCustomResourceDefinitions(ctx context.Context, hostReader ctrlruntime
 		Wanted: map[string]schema.GroupVersionKind{},
 	}
 
-	entries := CustomResourceEntries(cluster)
+	entries := StartupCustomResourceEntries(cluster)
 	if len(entries) == 0 {
 		return result, nil
 	}
@@ -77,10 +77,6 @@ func EnsureCustomResourceDefinitions(ctx context.Context, hostReader ctrlruntime
 	}
 
 	for _, cfg := range entries {
-		if !cfg.Enabled {
-			continue
-		}
-
 		gv, err := schema.ParseGroupVersion(cfg.APIVersion)
 		if err != nil {
 			return nil, fmt.Errorf("customResources entry %s/%s: %w", cfg.APIVersion, cfg.Kind, err)

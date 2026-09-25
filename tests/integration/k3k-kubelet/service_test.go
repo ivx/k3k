@@ -310,8 +310,8 @@ var ServiceTests = func() {
 			g.Expect(hostTestEnv.k8sClient.Get(ctx, client.ObjectKey{Name: hostServiceName, Namespace: namespace}, &hostService)).To(Succeed())
 			g.Expect(hostService.Spec.ClusterIP).To(Equal(virtService.Spec.ClusterIP))
 		}).
-			WithPolling(time.Millisecond * 300).
-			WithTimeout(time.Second * 20).
+			WithPolling(time.Millisecond * 500).
+			WithTimeout(time.Second * 60).
 			Should(Succeed())
 
 		Expect(virtService.UID).NotTo(Equal(service.UID), "the virtual service was created again")

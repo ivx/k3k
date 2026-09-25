@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/labels"
@@ -36,7 +38,20 @@ const (
 
 type ServiceReconciler struct {
 	*SyncerContext
+
+	// conflicts records, per virtual Service UID, when the host first
+	// rejected its ClusterIP or NodePorts as already allocated.
+	conflicts sync.Map
+	// now is the clock (tests replace it).
+	now func() time.Time
 }
+
+// allocationConflictGrace is how long an "already allocated" rejection must
+// last before the virtual Service gets a new value. The host releases the IP
+// and ports of a deleted Service asynchronously: right after the host copy
+// was deleted (by hand, or by the drift repair), the new copy is rejected
+// with its own old values for a moment. That is not a collision.
+const allocationConflictGrace = 30 * time.Second
 
 // AddServiceSyncer adds service syncer controller to the manager of the virtual cluster
 func AddServiceSyncer(ctx context.Context, virtMgr, hostMgr manager.Manager, clusterName, clusterNamespace string, recorder record.EventRecorder) error {
@@ -141,6 +156,8 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 			return r.hostRejected(ctx, &virtService, "create", err)
 		}
 
+		r.conflicts.Delete(virtService.UID)
+
 		return reconcile.Result{}, nil
 	}
 
@@ -181,6 +198,8 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 		if err := r.HostClient.Update(ctx, syncedService); err != nil {
 			return r.hostRejected(ctx, &virtService, "update", err)
 		}
+
+		r.conflicts.Delete(virtService.UID)
 	}
 
 	return reconcile.Result{}, r.syncStatus(ctx, &virtService, &hostService)
@@ -195,6 +214,20 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req reconcile.Request
 func (r *ServiceReconciler) hostRejected(ctx context.Context, virtService *corev1.Service, action string, err error) (reconcile.Result, error) {
 	ipConflict, nodePorts := allocationConflicts(err)
 
+	if ipConflict || len(nodePorts) > 0 {
+		now := r.clock()
+
+		first, _ := r.conflicts.LoadOrStore(virtService.UID, now)
+		if since := now.Sub(first.(time.Time)); since < allocationConflictGrace {
+			ctrl.LoggerFrom(ctx).Info("host rejected the service as already allocated, waiting before reallocation",
+				"service", virtService.Name, "namespace", virtService.Namespace, "since", since.String(), "error", err.Error())
+
+			return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		r.conflicts.Delete(virtService.UID)
+	}
+
 	switch {
 	case ipConflict:
 		return reconcile.Result{}, r.reallocateClusterIP(ctx, virtService)
@@ -203,6 +236,14 @@ func (r *ServiceReconciler) hostRejected(ctx context.Context, virtService *corev
 	default:
 		return reconcile.Result{}, r.syncFailed(virtService, action, err)
 	}
+}
+
+func (r *ServiceReconciler) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+
+	return time.Now()
 }
 
 // nodePortField matches the field path of a rejected NodePort.

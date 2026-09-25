@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -250,9 +251,20 @@ func TestServiceSyncClusterIPConflictReallocatesVirtualService(t *testing.T) {
 
 	env := newSvcTestEnv(t, nil, []runtime.Object{v}, hostFuncs, virtFuncs)
 
+	clock := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	env.r.now = func() time.Time { return clock }
+
+	// inside the grace period: no reallocation, retry later
+	res, err := env.r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "db", Namespace: "app"}})
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Second, res.RequeueAfter)
+	assert.Empty(t, env.events(), "a transient self-conflict is not reported as a collision")
+
+	clock = clock.Add(allocationConflictGrace)
+
 	require.NoError(t, env.reconcile(t, "db", "app"))
 
-	assert.Equal(t, 1, deleted, "the virtual service is deleted once")
+	assert.Equal(t, 1, deleted, "the virtual service is deleted once, after the grace period")
 	assert.Equal(t, 1, created, "and created again")
 
 	var fresh corev1.Service
@@ -262,7 +274,7 @@ func TestServiceSyncClusterIPConflictReallocatesVirtualService(t *testing.T) {
 	assert.Equal(t, "db", fresh.Labels["app"])
 	assert.Equal(t, []corev1.ServicePort{{Name: "http", Port: 80}}, fresh.Spec.Ports)
 
-	_, err := env.hostCopy(t, "db", "app")
+	_, err = env.hostCopy(t, "db", "app")
 	assert.True(t, apierrors.IsNotFound(err))
 
 	events := env.events()
@@ -287,6 +299,17 @@ func TestServiceSyncNodePortConflictClearsPort(t *testing.T) {
 	}
 
 	env := newSvcTestEnv(t, nil, []runtime.Object{v}, hostFuncs, nil)
+
+	clock := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	env.r.now = func() time.Time { return clock }
+
+	// inside the grace period: no reallocation, retry later
+	res, err := env.r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: "app"}})
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Second, res.RequeueAfter)
+	assert.Empty(t, env.events(), "a transient self-conflict is not reported as a collision")
+
+	clock = clock.Add(allocationConflictGrace)
 
 	require.NoError(t, env.reconcile(t, "web", "app"))
 

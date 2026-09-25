@@ -374,6 +374,11 @@ func addControllers(ctx context.Context, hostMgr, virtualMgr manager.Manager, c 
 		return fmt.Errorf("failed to add event syncer controller: %w", err)
 	}
 
+	// pods the host rejected once are retried instead of staying ProviderFailed
+	if err := syncer.AddPodRetryController(virtualMgr, c.ClusterName, c.ClusterNamespace); err != nil {
+		return fmt.Errorf("failed to add pod retry controller: %w", err)
+	}
+
 	// host copies whose virtual object is gone (datastore reset, missed
 	// deletes) are removed at start and periodically
 	if err := syncer.AddOrphanSweeper(virtualMgr, hostMgr, c.ClusterName, c.ClusterNamespace); err != nil {

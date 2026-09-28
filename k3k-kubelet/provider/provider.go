@@ -525,8 +525,8 @@ func (p *Provider) createPod(ctx context.Context, pod *corev1.Pod) error {
 // different node than the virtual cluster shows. The Pod's own nodeAffinity, podAffinity,
 // podAntiAffinity and topologySpreadConstraints are dropped: all virtual namespaces collapse into
 // one host namespace, so their label selectors would count the Pods of all virtual namespaces and
-// could contradict the virtual decision (Pending) or change the placement. The nodeSelector and the
-// tolerations are handled as without mirrorHostNodes.
+// could contradict the virtual decision (Pending) or change the placement. The nodeSelector is
+// handled as without mirrorHostNodes. The tolerations get one addition (see tolerateCordon).
 func (p *Provider) configureScheduling(hostPod *corev1.Pod) {
 	hostPod.Spec.NodeName = ""
 
@@ -548,6 +548,7 @@ func (p *Provider) configureScheduling(hostPod *corev1.Pod) {
 			},
 		}
 		hostPod.Spec.TopologySpreadConstraints = nil
+		hostPod.Spec.Tolerations = tolerateCordon(hostPod.Spec.Tolerations)
 
 		return
 	}
@@ -568,6 +569,33 @@ func (p *Provider) configureScheduling(hostPod *corev1.Pod) {
 			},
 		}
 	}
+}
+
+// tolerateCordon adds a toleration for the unschedulable taint of a cordoned node, unless the
+// tolerations already cover it.
+//
+// A pinned host Pod goes through the host scheduler, and the host scheduler does not place Pods on
+// a cordoned node. A kubelet runs a Pod that is bound to its node also when the node is cordoned:
+// the cordon only stops new placement decisions. The virtual scheduler binds a Pod to a mirrored
+// node before the cordon of the host node is mirrored, and the host Pod is created after the
+// cordon. Without the toleration that host Pod stays Pending for good, and when a PodDisruptionBudget
+// counts the Pod, the drain of the node waits for good too. The DaemonSet controller adds the same
+// toleration to its Pods for the same reason.
+func tolerateCordon(tolerations []corev1.Toleration) []corev1.Toleration {
+	for _, t := range tolerations {
+		keyMatches := t.Key == corev1.TaintNodeUnschedulable || (t.Key == "" && t.Operator == corev1.TolerationOpExists)
+		effectMatches := t.Effect == "" || t.Effect == corev1.TaintEffectNoSchedule
+
+		if keyMatches && effectMatches {
+			return tolerations
+		}
+	}
+
+	return append(slices.Clone(tolerations), corev1.Toleration{
+		Key:      corev1.TaintNodeUnschedulable,
+		Operator: corev1.TolerationOpExists,
+		Effect:   corev1.TaintEffectNoSchedule,
+	})
 }
 
 // withRetry retries passed function with interval and timeout
@@ -671,6 +699,11 @@ func (p *Provider) updatePod(ctx context.Context, pod *corev1.Pod) error {
 	}
 
 	updatePod(&hostPod, pod)
+
+	if p.mirrorHostNodes {
+		// the API server rejects the removal of a toleration from a Pod
+		hostPod.Spec.Tolerations = tolerateCordon(hostPod.Spec.Tolerations)
+	}
 
 	if err := p.Host.Client.Update(ctx, &hostPod); err != nil {
 		logger.Error(err, "Unable to update Pod in host cluster")

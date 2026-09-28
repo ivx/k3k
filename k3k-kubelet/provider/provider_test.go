@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -587,6 +588,9 @@ func TestConfigureScheduling(t *testing.T) {
 	}}
 
 	tolerations := []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "db", Effect: corev1.TaintEffectNoSchedule}}
+	pinnedTolerations := append(slices.Clone(tolerations), corev1.Toleration{
+		Key: "node.kubernetes.io/unschedulable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
+	})
 	nodeSelector := map[string]string{"pool": "db"}
 
 	newPod := func(affinity *corev1.Affinity, withSpread bool) *corev1.Pod {
@@ -611,30 +615,35 @@ func TestConfigureScheduling(t *testing.T) {
 		pod             *corev1.Pod
 		wantAffinity    *corev1.Affinity
 		wantSpread      []corev1.TopologySpreadConstraint
+		wantTolerations []corev1.Toleration
 	}{
 		{
-			name:         "without mirrorHostNodes, no own affinity: prefer the agent node",
-			pod:          newPod(nil, true),
-			wantAffinity: preferAgentNode,
-			wantSpread:   spread,
+			name:            "without mirrorHostNodes, no own affinity: prefer the agent node",
+			pod:             newPod(nil, true),
+			wantAffinity:    preferAgentNode,
+			wantSpread:      spread,
+			wantTolerations: tolerations,
 		},
 		{
-			name:         "without mirrorHostNodes, own affinity: keep it, no preference",
-			pod:          newPod(ownAffinity(), true),
-			wantAffinity: ownAffinity(),
-			wantSpread:   spread,
+			name:            "without mirrorHostNodes, own affinity: keep it, no preference",
+			pod:             newPod(ownAffinity(), true),
+			wantAffinity:    ownAffinity(),
+			wantSpread:      spread,
+			wantTolerations: tolerations,
 		},
 		{
-			name:            "with mirrorHostNodes, no own affinity: pin to the agent node",
+			name:            "with mirrorHostNodes, no own affinity: pin to the agent node, tolerate its cordon",
 			mirrorHostNodes: true,
 			pod:             newPod(nil, false),
 			wantAffinity:    pinToAgentNode,
+			wantTolerations: pinnedTolerations,
 		},
 		{
 			name:            "with mirrorHostNodes, own affinity and spread: pin only, own constraints dropped",
 			mirrorHostNodes: true,
 			pod:             newPod(ownAffinity(), true),
 			wantAffinity:    pinToAgentNode,
+			wantTolerations: pinnedTolerations,
 		},
 	}
 
@@ -647,9 +656,42 @@ func TestConfigureScheduling(t *testing.T) {
 			assert.Empty(t, tt.pod.Spec.NodeName)
 			assert.Equal(t, tt.wantAffinity, tt.pod.Spec.Affinity)
 			assert.Equal(t, tt.wantSpread, tt.pod.Spec.TopologySpreadConstraints)
-			// tolerations and the nodeSelector are not changed by the placement rules
-			assert.Equal(t, tolerations, tt.pod.Spec.Tolerations)
+			assert.Equal(t, tt.wantTolerations, tt.pod.Spec.Tolerations)
+			// the nodeSelector is not changed by the placement rules
 			assert.Equal(t, nodeSelector, tt.pod.Spec.NodeSelector)
+		})
+	}
+}
+
+// TestTolerateCordon pins that a pinned host Pod can start on a cordoned node, as a Pod bound to a
+// cordoned node does with a kubelet, and that the toleration is added only once.
+func TestTolerateCordon(t *testing.T) {
+	cordon := corev1.Toleration{Key: "node.kubernetes.io/unschedulable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}
+	other := corev1.Toleration{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "db", Effect: corev1.TaintEffectNoSchedule}
+	tolerateAll := corev1.Toleration{Operator: corev1.TolerationOpExists}
+	cordonAnyEffect := corev1.Toleration{Key: "node.kubernetes.io/unschedulable", Operator: corev1.TolerationOpExists}
+	cordonNoExecuteOnly := corev1.Toleration{Key: "node.kubernetes.io/unschedulable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute}
+
+	tests := []struct {
+		name string
+		in   []corev1.Toleration
+		want []corev1.Toleration
+	}{
+		{name: "no tolerations", in: nil, want: []corev1.Toleration{cordon}},
+		{name: "other tolerations are kept", in: []corev1.Toleration{other}, want: []corev1.Toleration{other, cordon}},
+		{name: "already tolerated", in: []corev1.Toleration{other, cordon}, want: []corev1.Toleration{other, cordon}},
+		{name: "tolerate every taint", in: []corev1.Toleration{tolerateAll}, want: []corev1.Toleration{tolerateAll}},
+		{name: "cordon with every effect", in: []corev1.Toleration{cordonAnyEffect}, want: []corev1.Toleration{cordonAnyEffect}},
+		{name: "cordon with another effect only", in: []corev1.Toleration{cordonNoExecuteOnly}, want: []corev1.Toleration{cordonNoExecuteOnly, cordon}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := slices.Clone(tt.in)
+
+			assert.Equal(t, tt.want, tolerateCordon(in))
+			// the input slice of the virtual Pod is not changed
+			assert.Equal(t, tt.in, in)
 		})
 	}
 }

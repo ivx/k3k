@@ -8,6 +8,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -792,4 +793,28 @@ func TestDeletePod_HostPodNotFound(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-1", Namespace: "default", UID: "virt-uid-1"}}
 
 	assert.NoError(t, p.deletePod(context.Background(), pod))
+}
+
+// A host Pod that is gone must be reported with virtual-kubelet's NotFound
+// error: only then the pod controller sets a running virtual Pod to Failed and
+// its controller creates it again.
+func TestGetPodReportsNotFoundToVirtualKubelet(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	p := Provider{
+		Host:             ClusterContext{Client: fake.NewClientBuilder().WithScheme(scheme).Build()},
+		Translator:       translate.ToHostTranslator{ClusterName: "c-test", ClusterNamespace: "ns-test"},
+		ClusterName:      "c-test",
+		ClusterNamespace: "ns-test",
+		logger:           logr.Discard(),
+	}
+
+	_, err := p.GetPodStatus(context.Background(), "app", "gone")
+	require.Error(t, err)
+	assert.True(t, errdefs.IsNotFound(err), "GetPodStatus: %v", err)
+
+	_, err = p.GetPod(context.Background(), "app", "gone")
+	require.Error(t, err)
+	assert.True(t, errdefs.IsNotFound(err), "GetPod: %v", err)
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
+	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	"k8s.io/apimachinery/pkg/types"
@@ -865,7 +866,12 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*corev1.
 
 	pod, err := p.getPodFromHostCluster(ctx, hostPodName)
 	if err != nil {
-		logger.Error(err, "Error getting pod from host cluster for GetPod")
+		if errdefs.IsNotFound(err) {
+			logger.V(1).Info("Pod not found in host cluster for GetPod")
+		} else {
+			logger.Error(err, "Error getting pod from host cluster for GetPod")
+		}
+
 		return nil, err
 	}
 
@@ -884,7 +890,12 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*c
 
 	pod, err := p.getPodFromHostCluster(ctx, hostPodName)
 	if err != nil {
-		logger.Error(err, "Error getting pod from host cluster for PodStatus")
+		if errdefs.IsNotFound(err) {
+			logger.V(1).Info("Pod not found in host cluster for PodStatus")
+		} else {
+			logger.Error(err, "Error getting pod from host cluster for PodStatus")
+		}
+
 		return nil, err
 	}
 
@@ -899,6 +910,14 @@ func (p *Provider) getPodFromHostCluster(ctx context.Context, hostPodName string
 
 	var pod corev1.Pod
 	if err := p.Host.Client.Get(ctx, key, &pod); err != nil {
+		// virtual-kubelet recognizes only its own NotFound error. With it, a
+		// running virtual Pod whose host Pod is gone (evicted by a drain,
+		// deleted on the host) is set to Failed and its controller creates it
+		// again; with the plain API error the virtual Pod stayed Running.
+		if apierrors.IsNotFound(err) {
+			return nil, errdefs.AsNotFound(err)
+		}
+
 		return nil, err
 	}
 

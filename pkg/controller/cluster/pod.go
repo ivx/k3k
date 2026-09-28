@@ -142,7 +142,16 @@ func (r *PodReconciler) removeVirtualPod(ctx context.Context, hostKey types.Name
 
 	var virtPod corev1.Pod
 	if err := virtualClient.Get(ctx, ref.virtual, &virtPod); err != nil {
-		return ctrlruntimeclient.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+
+		// keep the entry for the requeue: the host Pod stays NotFound, so this
+		// is the only record of the virtual Pod (a drain can make the virtual
+		// API server briefly unreachable exactly now)
+		r.terminating.Store(hostKey, ref)
+
+		return err
 	}
 
 	// only a Pod that is already being deleted, and only the same incarnation
@@ -154,9 +163,19 @@ func (r *PodReconciler) removeVirtualPod(ctx context.Context, hostKey types.Name
 
 	uid := ref.uid
 
-	return ctrlruntimeclient.IgnoreNotFound(virtualClient.Delete(ctx, &virtPod,
+	err = virtualClient.Delete(ctx, &virtPod,
 		ctrlruntimeclient.GracePeriodSeconds(0),
-		ctrlruntimeclient.Preconditions{UID: &uid}))
+		ctrlruntimeclient.Preconditions{UID: &uid})
+
+	// NotFound: already gone; Conflict: the UID precondition failed, a newer
+	// Pod has the name now
+	if err == nil || apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+		return nil
+	}
+
+	r.terminating.Store(hostKey, ref)
+
+	return err
 }
 
 func (r *PodReconciler) virtualClient(ctx context.Context, cluster types.NamespacedName) (ctrlruntimeclient.Client, error) {

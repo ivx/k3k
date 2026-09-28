@@ -177,3 +177,64 @@ func TestPodControllerIgnoresUnknownHostPod(t *testing.T) {
 	require.NoError(t, env.virt.Get(context.Background(), types.NamespacedName{Name: "web", Namespace: "app"}, &vp))
 	assert.True(t, vp.DeletionTimestamp.IsZero())
 }
+
+// TestPodControllerRetriesAfterVirtualAPIError pins that a failed call to the
+// virtual API server does not lose the terminating virtual Pod: the host Pod
+// stays NotFound, so the requeue must still find the entry (zulu drain: two
+// CNPG Pods waited for their 1800 s grace period).
+func TestPodControllerRetriesAfterVirtualAPIError(t *testing.T) {
+	env := newPodTestEnv(t, []runtime.Object{hostPodFor("db-1", "auth", "uid-db")}, []runtime.Object{virtPodWithGrace("db-1", "auth", "uid-db")})
+
+	failGet, failDelete := false, false
+	forceDeletes := 0
+	unavailable := apierrors.NewServiceUnavailable("virtual API server unreachable")
+
+	env.virt = interceptor.NewClient(env.virt.(ctrlruntimeclient.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlruntimeclient.WithWatch, key ctrlruntimeclient.ObjectKey, obj ctrlruntimeclient.Object, opts ...ctrlruntimeclient.GetOption) error {
+			if failGet {
+				failGet = false
+
+				return unavailable
+			}
+
+			return c.Get(ctx, key, obj, opts...)
+		},
+		Delete: func(ctx context.Context, c ctrlruntimeclient.WithWatch, obj ctrlruntimeclient.Object, opts ...ctrlruntimeclient.DeleteOption) error {
+			o := ctrlruntimeclient.DeleteOptions{}
+			o.ApplyOptions(opts)
+
+			if o.GracePeriodSeconds != nil && *o.GracePeriodSeconds == 0 {
+				if failDelete {
+					failDelete = false
+
+					return unavailable
+				}
+
+				forceDeletes++
+			}
+
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+
+	env.startHostDeletion(t, "db-1-host")
+	env.reconcile(t, "db-1-host")
+	env.finishHostDeletion(t, "db-1-host")
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "db-1-host", Namespace: podTestVC}}
+
+	// the Get of the virtual Pod fails: error (requeue), the entry stays
+	failGet = true
+	_, err := env.r.Reconcile(context.Background(), req)
+	require.Error(t, err)
+
+	// the forced Delete fails: error (requeue), the entry stays
+	failDelete = true
+	_, err = env.r.Reconcile(context.Background(), req)
+	require.Error(t, err)
+	assert.Equal(t, 0, forceDeletes)
+
+	// the virtual API server answers again: the virtual Pod is removed
+	env.reconcile(t, "db-1-host")
+	assert.Equal(t, 1, forceDeletes)
+}

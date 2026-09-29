@@ -79,6 +79,44 @@ start_single_node() {
 	/bin/k3s server --config {{.INIT_CONFIG}} $EXTRA_ARGS 2>&1 | tee /var/log/k3s.log
 }
 
+# watch_etcd_membership requests a rejoin when the etcd member of this server
+# was removed while its etcd did not run. etcd then writes no tombstone, and
+# k3s starts the removed member again and again. The k3k controller writes the
+# time and the names of the current members into the pod annotation
+# {{.ETCD_MEMBERS_ANNOTATION}} while this server is not ready. If a list that
+# was read after the start of this container does not contain the member name
+# of this server, the watcher writes the tombstone (as etcd does when it sees
+# its removal) and asks for a restart through the liveness probe. k3s then backs
+# up the data and joins as a new member.
+watch_etcd_membership() {
+	started=$(date +%s)
+
+	while sleep 30; do
+		value=$(sed -n 's|^{{.ETCD_MEMBERS_ANNOTATION}}="\(.*\)"$|\1|p' {{.META_DIR}}/annotations 2>/dev/null)
+		listed=${value%% *}
+		members=${value#* }
+		name=$(cat {{.ETCD_DIR}}/name 2>/dev/null)
+
+		case "$listed" in
+			''|*[!0-9]*) continue ;;
+		esac
+
+		if [ -z "$name" ] || [ "$listed" -le "$started" ]; then
+			continue
+		fi
+
+		case ",$members," in
+			*",$name,"*) continue ;;
+		esac
+
+		info "etcd member $name is not in the cluster ($members): requesting a restart to rejoin"
+		touch {{.ETCD_DIR}}/tombstone
+		echo "k3k: etcd member $name was removed, restart to rejoin the cluster" >> /var/log/k3s.log
+
+		return
+	done
+}
+
 start_ha_node() {
 	info "Starting pod $POD_NAME in HA node setup"
 
@@ -93,7 +131,9 @@ start_ha_node() {
 		info "Adding pod IP file."
 		echo $POD_IP > /var/lib/rancher/k3s/k3k-node-ip
 
-		/bin/k3s server --config {{.SERVER_CONFIG}} $EXTRA_ARGS 2>&1 | tee /var/log/k3s.info
+		watch_etcd_membership &
+
+		/bin/k3s server --config {{.SERVER_CONFIG}} $EXTRA_ARGS 2>&1 | tee /var/log/k3s.log
 	fi
 }
 

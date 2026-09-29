@@ -38,7 +38,13 @@ const (
 	k3sTLSDir        = "/var/lib/rancher/k3s/server/tls"
 	k3sLogDir        = "/var/log"
 	k3sVarRunDir     = "/var/run"
+	k3kMetaDir       = "/etc/k3k-meta"
 )
+
+// EtcdMembersAnnotation is set by the controller on a server pod that is not ready: the time
+// (unix seconds) and the comma-separated names of the current etcd members. The startup script
+// reads it to detect that the etcd member of the pod was removed (see watch_etcd_membership).
+const EtcdMembersAnnotation = "k3k.io/etcd-members"
 
 type Server struct {
 	cluster          *v1beta1.Cluster
@@ -130,6 +136,17 @@ func (s *Server) podSpec(ctx context.Context, image, name string, persistent boo
 				},
 			},
 			{
+				Name: "k3k-meta",
+				VolumeSource: corev1.VolumeSource{
+					DownwardAPI: &corev1.DownwardAPIVolumeSource{
+						Items: []corev1.DownwardAPIVolumeFile{{
+							Path:     "annotations",
+							FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.annotations"},
+						}},
+					},
+				},
+			},
+			{
 				Name: "var-lib-kubelet",
 				VolumeSource: corev1.VolumeSource{
 					EmptyDir: &corev1.EmptyDirVolumeSource{},
@@ -199,6 +216,11 @@ func (s *Server) podSpec(ctx context.Context, image, name string, persistent boo
 						Name:      "var-log",
 						MountPath: k3sLogDir,
 						ReadOnly:  false,
+					},
+					{
+						Name:      "k3k-meta",
+						MountPath: k3kMetaDir,
+						ReadOnly:  true,
 					},
 				},
 			},
@@ -485,13 +507,15 @@ func (s *Server) setupStartCommand() (string, error) {
 	}
 
 	if err := tmplCmd.Execute(&output, map[string]string{
-		"ETCD_DIR":      k3sETCDDataDir,
-		"INIT_CONFIG":   filepath.Join(k3sInitConfigDir, "config.yaml"),
-		"SERVER_CONFIG": filepath.Join(k3sConfigDir, "config.yaml"),
-		"CLUSTER_MODE":  mode,
-		"K3K_MODE":      string(s.cluster.Spec.Mode),
-		"EXTRA_ARGS":    strings.Join(s.cluster.Spec.ServerArgs, " "),
-		"RUNTIME_CLASS": runtimeClass,
+		"ETCD_DIR":                k3sETCDDataDir,
+		"META_DIR":                k3kMetaDir,
+		"ETCD_MEMBERS_ANNOTATION": EtcdMembersAnnotation,
+		"INIT_CONFIG":             filepath.Join(k3sInitConfigDir, "config.yaml"),
+		"SERVER_CONFIG":           filepath.Join(k3sConfigDir, "config.yaml"),
+		"CLUSTER_MODE":            mode,
+		"K3K_MODE":                string(s.cluster.Spec.Mode),
+		"EXTRA_ARGS":              strings.Join(s.cluster.Spec.ServerArgs, " "),
+		"RUNTIME_CLASS":           runtimeClass,
 	}); err != nil {
 		return "", err
 	}

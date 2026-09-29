@@ -148,7 +148,7 @@ func (p *StatefulSetReconciler) Reconcile(ctx context.Context, req reconcile.Req
 		}
 	}
 
-	return reconcile.Result{}, nil
+	return p.reconcileEtcdMembers(ctx, &cluster, podList.Items)
 }
 
 func (p *StatefulSetReconciler) handleServerPod(ctx context.Context, cluster v1beta1.Cluster, pod *corev1.Pod) error {
@@ -202,18 +202,8 @@ func (p *StatefulSetReconciler) handleServerPod(ctx context.Context, cluster v1b
 		return nil
 	}
 
-	tlsConfig, err := p.getETCDTLS(ctx, &cluster)
-	if err != nil {
-		return err
-	}
-
 	// remove server from etcd
-	client, err := clientv3.New(clientv3.Config{
-		Endpoints: []string{
-			fmt.Sprintf("https://%s.%s:2379", server.ServiceName(cluster.Name), pod.Namespace),
-		},
-		TLS: tlsConfig,
-	})
+	client, err := p.etcdClient(ctx, &cluster)
 	if err != nil {
 		return err
 	}
@@ -232,6 +222,21 @@ func (p *StatefulSetReconciler) handleServerPod(ctx context.Context, cluster v1b
 	}
 
 	return nil
+}
+
+// etcdClient returns a client for the etcd cluster of the servers, through the server Service.
+func (p *StatefulSetReconciler) etcdClient(ctx context.Context, cluster *v1beta1.Cluster) (*clientv3.Client, error) {
+	tlsConfig, err := p.getETCDTLS(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+
+	return clientv3.New(clientv3.Config{
+		Endpoints: []string{
+			fmt.Sprintf("https://%s.%s:2379", server.ServiceName(cluster.Name), cluster.Namespace),
+		},
+		TLS: tlsConfig,
+	})
 }
 
 func (p *StatefulSetReconciler) getETCDTLS(ctx context.Context, cluster *v1beta1.Cluster) (*tls.Config, error) {

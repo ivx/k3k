@@ -74,6 +74,10 @@ type Provider struct {
 
 var ErrRetryTimeout = errors.New("provider timed out")
 
+// providerFailedReason is the status reason that virtual-kubelet sets when the provider rejected
+// a Pod. The pod retry controller retries Pods with this reason.
+const providerFailedReason = "ProviderFailed"
+
 func New(hostConfig rest.Config, hostMgr, virtualMgr manager.Manager, logger logr.Logger, namespace, name, serverIP, dnsIP, agentHostname string, mirrorHostNodes bool) (*Provider, error) {
 	coreClient, err := cv1.NewForConfig(&hostConfig)
 	if err != nil {
@@ -1004,11 +1008,19 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*c
 	}
 
 	// The status of an older incarnation is not the status of the current virtual Pod (see
-	// GetPod). Report the current status unchanged, not NotFound: virtual-kubelet sets a virtual
-	// Pod without a host Pod to Failed after one minute, and its StatefulSet makes it again.
+	// GetPod). Do not report NotFound: virtual-kubelet sets a virtual Pod without a host Pod to
+	// Failed after one minute, and its StatefulSet makes it again. Report the state that
+	// virtual-kubelet sets after the failed create (see existingHostPod), so that the pod retry
+	// controller keeps retrying. A copy of the cached virtual status could be older than that
+	// state and would reset it.
 	var virtualPod corev1.Pod
 	if err := p.Virtual.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &virtualPod); err == nil && isOlderIncarnation(pod, &virtualPod) {
-		return virtualPod.Status.DeepCopy(), nil
+		status := virtualPod.Status.DeepCopy()
+		status.Phase = corev1.PodPending
+		status.Reason = providerFailedReason
+		status.Message = fmt.Sprintf("waiting for host pod %s of an older pod incarnation to be removed", hostPodName)
+
+		return status, nil
 	}
 
 	return pod.Status.DeepCopy(), nil

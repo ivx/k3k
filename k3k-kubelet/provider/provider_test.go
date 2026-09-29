@@ -970,12 +970,16 @@ func TestGetPodStatus_OlderIncarnation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, corev1.PodRunning, status.Phase)
 
-	// copy of an older incarnation: the current virtual status is kept (no NotFound, no status of the old copy)
-	p = n.provider(t, n.hostPod("virt-uid-1"), n.virtualPod("virt-uid-2"))
+	// copy of an older incarnation: Pending/ProviderFailed (no NotFound, no status of the old
+	// copy), also when the cached virtual status has no reason yet
+	virtualPod := n.virtualPod("virt-uid-2")
+	virtualPod.Status.Reason = ""
+	p = n.provider(t, n.hostPod("virt-uid-1"), virtualPod)
 	status, err = p.GetPodStatus(context.Background(), "default", "db-2")
 	require.NoError(t, err)
 	assert.Equal(t, corev1.PodPending, status.Phase)
 	assert.Equal(t, "ProviderFailed", status.Reason)
+	assert.Contains(t, status.Message, "older pod incarnation")
 	assert.Empty(t, status.PodIP)
 }
 

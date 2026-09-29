@@ -501,13 +501,62 @@ func (p *Provider) createPod(ctx context.Context, pod *corev1.Pod) error {
 	}
 
 	if err := p.Host.Client.Create(ctx, hostPod); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return p.existingHostPod(ctx, logger, hostPod.Name, &virtualPod, err)
+		}
+
 		logger.Error(err, "Error creating pod on host cluster")
+
 		return err
 	}
 
 	logger.Info("Pod created on host cluster")
 
 	return nil
+}
+
+// existingHostPod handles a create that failed because a host Pod with the same name exists.
+// If it is the copy of virtualPod (an earlier create that virtual-kubelet did not see), the
+// create is done. If it is the copy of an older incarnation of the Pod, its virtual Pod does not
+// exist anymore: the copy is deleted (if it does not terminate yet) and an error is returned.
+// virtual-kubelet then sets the virtual Pod to Pending/ProviderFailed, and the pod retry
+// controller starts a new attempt until the old copy is gone.
+func (p *Provider) existingHostPod(ctx context.Context, logger logr.Logger, hostPodName string, virtualPod *corev1.Pod, createErr error) error {
+	existing, err := p.Host.CoreClient.Pods(p.ClusterNamespace).Get(ctx, hostPodName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return createErr
+		}
+
+		return err
+	}
+
+	uid := existing.Annotations[translate.VirtualUIDAnnotation]
+	if uid == string(virtualPod.UID) {
+		logger.Info("Pod already exists on host cluster")
+		return nil
+	}
+
+	if uid == "" {
+		logger.Error(createErr, "Error creating pod on host cluster")
+		return createErr
+	}
+
+	if existing.DeletionTimestamp == nil {
+		hostUID := existing.UID
+
+		err := p.Host.CoreClient.Pods(p.ClusterNamespace).Delete(ctx, hostPodName, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &hostUID},
+		})
+		if err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Error deleting host pod of an older pod incarnation", "hostPodUID", hostUID)
+			return err
+		}
+
+		logger.Info("Deleted host pod of an older pod incarnation", "hostPodUID", hostUID, "hostPodVirtualUID", uid)
+	}
+
+	return fmt.Errorf("host pod %s of an older incarnation (virtual UID %s) still exists: %w", hostPodName, uid, createErr)
 }
 
 // configureScheduling sets the scheduling constraints of the host Pod. The NodeName of the
@@ -696,6 +745,11 @@ func (p *Provider) updatePod(ctx context.Context, pod *corev1.Pod) error {
 	if err := p.Host.Client.Get(ctx, hostKey, &hostPod); err != nil {
 		logger.Error(err, "Unable to get Pod to update from host cluster")
 		return err
+	}
+
+	// never change the copy of another incarnation (see GetPod)
+	if owned, reason := p.ownsHostPod(pod, &hostPod); !owned {
+		return fmt.Errorf("host pod %s belongs to another pod incarnation: %s", hostPodName, reason)
 	}
 
 	updatePod(&hostPod, pod)
@@ -908,6 +962,25 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*corev1.
 		return nil, err
 	}
 
+	// A host Pod of an older incarnation (e.g. a StatefulSet Pod deleted with --force while its
+	// host Pod terminates) is not the Pod of the current virtual Pod. Report it as missing, so that
+	// virtual-kubelet calls CreatePod (see existingHostPod) instead of updating the old copy and
+	// taking over its status. Read the virtual Pod from the API server: with a stale cache the old
+	// copy would be returned, and virtual-kubelet does not ask again until the Pod spec changes.
+	// If the virtual Pod does not exist, the host Pod is returned: virtual-kubelet deletes it.
+	virtualPod, err := p.Virtual.CoreClient.Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		logger.Error(err, "Error getting pod from virtual cluster for GetPod")
+		return nil, err
+	}
+
+	if err == nil && isOlderIncarnation(pod, virtualPod) {
+		logger.Info("Host pod belongs to an older incarnation of the pod", "virtualUID", virtualPod.UID, "hostPodVirtualUID", pod.Annotations[translate.VirtualUIDAnnotation])
+		return nil, errdefs.NotFoundf("host pod %s belongs to an older incarnation of pod %s/%s", hostPodName, namespace, name)
+	}
+
+	p.Translator.TranslateFrom(pod)
+
 	return pod, nil
 }
 
@@ -932,9 +1005,26 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*c
 		return nil, err
 	}
 
+	// The status of an older incarnation is not the status of the current virtual Pod (see
+	// GetPod). Report the current status unchanged, not NotFound: virtual-kubelet sets a virtual
+	// Pod without a host Pod to Failed after one minute, and its StatefulSet makes it again.
+	var virtualPod corev1.Pod
+	if err := p.Virtual.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &virtualPod); err == nil && isOlderIncarnation(pod, &virtualPod) {
+		return virtualPod.Status.DeepCopy(), nil
+	}
+
 	return pod.Status.DeepCopy(), nil
 }
 
+// isOlderIncarnation reports whether hostPod was made for an older incarnation of virtualPod: a
+// virtual Pod with the same name and another UID. A host Pod without the virtual UID annotation
+// (made by an older k3k-kubelet) is never reported.
+func isOlderIncarnation(hostPod, virtualPod *corev1.Pod) bool {
+	uid := hostPod.Annotations[translate.VirtualUIDAnnotation]
+	return uid != "" && virtualPod.UID != "" && uid != string(virtualPod.UID)
+}
+
+// getPodFromHostCluster returns the host Pod as it is on the host (not translated).
 func (p *Provider) getPodFromHostCluster(ctx context.Context, hostPodName string) (*corev1.Pod, error) {
 	key := types.NamespacedName{
 		Namespace: p.ClusterNamespace,
@@ -953,8 +1043,6 @@ func (p *Provider) getPodFromHostCluster(ctx context.Context, hostPodName string
 
 		return nil, err
 	}
-
-	p.Translator.TranslateFrom(&pod)
 
 	return &pod, nil
 }

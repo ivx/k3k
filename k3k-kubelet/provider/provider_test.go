@@ -860,3 +860,199 @@ func TestGetPodReportsNotFoundToVirtualKubelet(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errdefs.IsNotFound(err), "GetPod: %v", err)
 }
+
+// namereuse builds the objects for the name reuse tests: a host copy made for the virtual Pod UID
+// hostVirtualUID, and the current virtual Pod with the same name.
+type namereuse struct {
+	translator  translate.ToHostTranslator
+	hostPodName string
+}
+
+func newNamereuse() namereuse {
+	translator := translate.ToHostTranslator{ClusterName: "c-test", ClusterNamespace: "ns-test"}
+
+	return namereuse{translator: translator, hostPodName: translator.TranslateName("default", "db-2")}
+}
+
+func (n namereuse) hostPod(hostVirtualUID string) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      n.hostPodName,
+			Namespace: "ns-test",
+			UID:       "host-uid",
+			Labels:    map[string]string{translate.ClusterNameLabel: "c-test", translate.AgentNameLabel: "node-a"},
+			Annotations: map[string]string{
+				translate.ResourceNameAnnotation:      "db-2",
+				translate.ResourceNamespaceAnnotation: "default",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
+	}
+	if hostVirtualUID != "" {
+		pod.Annotations[translate.VirtualUIDAnnotation] = hostVirtualUID
+	}
+
+	return pod
+}
+
+func (n namereuse) virtualPod(uid string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-2", Namespace: "default", UID: types.UID(uid)},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending, Reason: "ProviderFailed"},
+	}
+}
+
+func (n namereuse) provider(t *testing.T, hostPod, virtualPod *corev1.Pod) Provider {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	virtualObjects := []runtime.Object{}
+	virtualClient := fake.NewClientBuilder().WithScheme(scheme)
+
+	if virtualPod != nil {
+		virtualObjects = append(virtualObjects, virtualPod)
+		virtualClient = virtualClient.WithObjects(virtualPod)
+	}
+
+	return Provider{
+		Host:             ClusterContext{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(hostPod).Build()},
+		Virtual:          ClusterContext{Client: virtualClient.Build(), CoreClient: k8sfake.NewClientset(virtualObjects...).CoreV1()},
+		Translator:       n.translator,
+		ClusterName:      "c-test",
+		ClusterNamespace: "ns-test",
+		agentHostname:    "node-a",
+		logger:           logr.Discard(),
+	}
+}
+
+func TestGetPod_OlderIncarnation(t *testing.T) {
+	n := newNamereuse()
+
+	tests := []struct {
+		name         string
+		hostPod      *corev1.Pod
+		virtualPod   *corev1.Pod
+		wantNotFound bool
+	}{
+		{name: "copy of the current virtual pod", hostPod: n.hostPod("virt-uid-2"), virtualPod: n.virtualPod("virt-uid-2")},
+		{name: "copy of an older incarnation", hostPod: n.hostPod("virt-uid-1"), virtualPod: n.virtualPod("virt-uid-2"), wantNotFound: true},
+		{name: "virtual pod deleted: the copy is returned for the delete", hostPod: n.hostPod("virt-uid-1")},
+		{name: "copy of an older k3k-kubelet without virtual UID", hostPod: n.hostPod(""), virtualPod: n.virtualPod("virt-uid-2")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := n.provider(t, tt.hostPod, tt.virtualPod)
+
+			pod, err := p.GetPod(context.Background(), "default", "db-2")
+			if tt.wantNotFound {
+				require.Error(t, err)
+				assert.True(t, errdefs.IsNotFound(err), "GetPod: %v", err)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, "db-2", pod.Name, "the host pod must be translated")
+			assert.Equal(t, "default", pod.Namespace)
+		})
+	}
+}
+
+func TestGetPodStatus_OlderIncarnation(t *testing.T) {
+	n := newNamereuse()
+
+	// copy of the current virtual pod: its status is returned
+	p := n.provider(t, n.hostPod("virt-uid-2"), n.virtualPod("virt-uid-2"))
+	status, err := p.GetPodStatus(context.Background(), "default", "db-2")
+	require.NoError(t, err)
+	assert.Equal(t, corev1.PodRunning, status.Phase)
+
+	// copy of an older incarnation: the current virtual status is kept (no NotFound, no status of the old copy)
+	p = n.provider(t, n.hostPod("virt-uid-1"), n.virtualPod("virt-uid-2"))
+	status, err = p.GetPodStatus(context.Background(), "default", "db-2")
+	require.NoError(t, err)
+	assert.Equal(t, corev1.PodPending, status.Phase)
+	assert.Equal(t, "ProviderFailed", status.Reason)
+	assert.Empty(t, status.PodIP)
+}
+
+func TestExistingHostPod(t *testing.T) {
+	n := newNamereuse()
+	createErr := apierrors.NewAlreadyExists(corev1.Resource("pods"), n.hostPodName)
+
+	terminating := n.hostPod("virt-uid-1")
+	terminating.DeletionTimestamp = &metav1.Time{}
+
+	tests := []struct {
+		name        string
+		hostPod     *corev1.Pod
+		wantErr     bool
+		wantDeleted bool
+	}{
+		{name: "copy of this virtual pod: create is done", hostPod: n.hostPod("virt-uid-2")},
+		{name: "running copy of an older incarnation is deleted", hostPod: n.hostPod("virt-uid-1"), wantErr: true, wantDeleted: true},
+		{name: "terminating copy of an older incarnation is kept", hostPod: terminating, wantErr: true},
+		{name: "copy of an older k3k-kubelet is kept", hostPod: n.hostPod(""), wantErr: true},
+		{name: "copy gone meanwhile: the retry creates the pod", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var clientset *k8sfake.Clientset
+			if tt.hostPod != nil {
+				clientset = k8sfake.NewClientset(tt.hostPod)
+			} else {
+				clientset = k8sfake.NewClientset()
+			}
+
+			var deletes []k8stesting.DeleteActionImpl
+
+			clientset.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				deletes = append(deletes, action.(k8stesting.DeleteActionImpl))
+				return false, nil, nil
+			})
+
+			p := Provider{
+				Host:             ClusterContext{CoreClient: clientset.CoreV1()},
+				ClusterNamespace: "ns-test",
+				logger:           logr.Discard(),
+			}
+
+			err := p.existingHostPod(context.Background(), logr.Discard(), n.hostPodName, n.virtualPod("virt-uid-2"), createErr)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			if !tt.wantDeleted {
+				assert.Empty(t, deletes)
+				return
+			}
+
+			require.Len(t, deletes, 1)
+			require.NotNil(t, deletes[0].DeleteOptions.Preconditions)
+			assert.Equal(t, tt.hostPod.UID, *deletes[0].DeleteOptions.Preconditions.UID)
+		})
+	}
+}
+
+func TestUpdatePod_OtherIncarnationUnchanged(t *testing.T) {
+	n := newNamereuse()
+	hostPod := n.hostPod("virt-uid-1")
+	hostPod.Spec.Containers = []corev1.Container{{Name: "main", Image: "old"}}
+
+	p := n.provider(t, hostPod, nil)
+
+	virtualPod := n.virtualPod("virt-uid-2")
+	virtualPod.Spec.Containers = []corev1.Container{{Name: "main", Image: "new"}}
+
+	require.Error(t, p.updatePod(context.Background(), virtualPod))
+
+	var got corev1.Pod
+	require.NoError(t, p.Host.Client.Get(context.Background(), types.NamespacedName{Namespace: "ns-test", Name: n.hostPodName}, &got))
+	assert.Equal(t, "old", got.Spec.Containers[0].Image)
+}

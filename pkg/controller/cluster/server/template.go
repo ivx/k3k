@@ -81,38 +81,53 @@ start_single_node() {
 
 # watch_etcd_membership requests a rejoin when the etcd member of this server
 # was removed while its etcd did not run. etcd then writes no tombstone, and
-# k3s starts the removed member again and again. The k3k controller writes the
-# time and the names of the current members into the pod annotation
-# {{.ETCD_MEMBERS_ANNOTATION}} while this server is not ready. If a list that
-# was read after the start of this container does not contain the member name
-# of this server, the watcher writes the tombstone (as etcd does when it sees
-# its removal) and asks for a restart through the liveness probe ({{.REJOIN_FILE}}).
-# k3s then backs up the data and joins as a new member.
+# k3s starts the removed member again and again. Two signals:
+# - etcd reports that the other members reject it ("{{.ETCD_REMOVED_TEXT}}"
+#   in the log of this container).
+# - The k3k controller writes the time and the names of the current members
+#   into the pod annotation {{.ETCD_MEMBERS_ANNOTATION}} while this server is
+#   not ready, and a list that was read after the start of this container does
+#   not contain the member name of this server.
+# The watcher then writes the tombstone (as etcd does when it sees its removal
+# while it runs) and asks for a restart through the liveness probe
+# ({{.REJOIN_FILE}}). k3s then backs up the data and joins as a new member.
 watch_etcd_membership() {
 	started=$(date +%s)
 
 	while sleep 30; do
-		value=$(sed -n 's|^{{.ETCD_MEMBERS_ANNOTATION}}="\(.*\)"$|\1|p' {{.META_DIR}}/annotations 2>/dev/null)
-		listed=${value%% *}
-		members=${value#* }
 		name=$(cat {{.ETCD_DIR}}/name 2>/dev/null)
-
-		case "$listed" in
-			''|*[!0-9]*) continue ;;
-		esac
-
-		if [ -z "$name" ] || [ "$listed" -le "$started" ]; then
+		if [ -z "$name" ]; then
 			continue
 		fi
 
-		case ",$members," in
-			*",$name,"*) continue ;;
-		esac
+		reason=""
 
-		info "etcd member $name is not in the cluster ($members): requesting a restart to rejoin"
+		if grep -qs "{{.ETCD_REMOVED_TEXT}}" /var/log/k3s.log; then
+			reason="etcd reports that the member was removed"
+		else
+			value=$(sed -n 's|^{{.ETCD_MEMBERS_ANNOTATION}}="\(.*\)"$|\1|p' {{.META_DIR}}/annotations 2>/dev/null)
+			listed=${value%% *}
+			members=${value#* }
+
+			case "$listed" in
+				''|*[!0-9]*) continue ;;
+			esac
+
+			if [ "$listed" -le "$started" ]; then
+				continue
+			fi
+
+			case ",$members," in
+				*",$name,"*) continue ;;
+			esac
+
+			reason="not in the member list ($members)"
+		fi
+
+		info "etcd member $name: $reason: requesting a restart to join again"
 		touch {{.ETCD_DIR}}/tombstone
 		# own file: tee writes k3s.log at its own offset and would overwrite an appended line
-		echo "k3k: etcd member $name was {{.REMOVED_TEXT}}, restart to join again" > {{.REJOIN_FILE}}
+		echo "k3k: etcd member $name {{.REMOVED_TEXT}}, restart to join again" > {{.REJOIN_FILE}}
 
 		return
 	done

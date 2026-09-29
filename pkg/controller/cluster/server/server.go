@@ -43,13 +43,18 @@ const (
 	// liveness probe (see watch_etcd_membership).
 	k3kRejoinFile = "/var/log/k3k-rejoin"
 
-	// removedFromClusterText is part of the message of etcd when it sees the removal of its
-	// member ("This node has been removed from the cluster - please restart k3s to rejoin the
-	// cluster") and of the rejoin request of the startup script. The liveness probe restarts
-	// the server on it. It must not match the message of the rejoin itself ("tombstone file
-	// has been detected, removing ${datadir}/server/db to rejoin the cluster"): a restart in
-	// the middle of the join.
-	removedFromClusterText = "removed from the cluster"
+	// removedFromClusterText is part of the message of k3s when etcd reported the removal of its
+	// member and k3s wrote the tombstone ("This node has been removed from the cluster - please
+	// restart k3s to rejoin the cluster"), and of the rejoin request of the startup script. The
+	// liveness probe restarts the server on it. It must not match the message of the rejoin
+	// itself ("tombstone file has been detected, removing ${datadir}/server/db to rejoin the
+	// cluster": a restart in the middle of the join), nor the etcd error "the member has been
+	// permanently removed from the cluster": without a tombstone, the restart starts the removed
+	// member again (the startup script writes the tombstone first, see watch_etcd_membership).
+	removedFromClusterText = "has been removed from the cluster"
+
+	// etcdRemovedText is part of the etcd error when the other members reject its removed member.
+	etcdRemovedText = "permanently removed from the cluster"
 )
 
 // EtcdMembersAnnotation is set by the controller on a server pod that is not ready: the time
@@ -522,6 +527,7 @@ func (s *Server) setupStartCommand() (string, error) {
 		"META_DIR":                k3kMetaDir,
 		"REJOIN_FILE":             k3kRejoinFile,
 		"REMOVED_TEXT":            removedFromClusterText,
+		"ETCD_REMOVED_TEXT":       etcdRemovedText,
 		"ETCD_MEMBERS_ANNOTATION": EtcdMembersAnnotation,
 		"INIT_CONFIG":             filepath.Join(k3sInitConfigDir, "config.yaml"),
 		"SERVER_CONFIG":           filepath.Join(k3sConfigDir, "config.yaml"),

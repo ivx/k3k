@@ -54,9 +54,12 @@ func TestLivenessProbeReadsRejoinRequest(t *testing.T) {
 	assert.Contains(t, cmd, "/var/log/k3s.log")
 	assert.Contains(t, cmd, k3kRejoinFile)
 
-	// the message of etcd about its removal restarts the server, the message of the rejoin must not
+	// the message of k3s after it wrote the tombstone restarts the server; the rejoin message and
+	// the etcd error (no tombstone yet) must not
 	assert.Contains(t, "This node has been removed from the cluster - please restart k3s to rejoin the cluster", removedFromClusterText)
 	assert.NotContains(t, "tombstone file has been detected, removing ${datadir}/server/db to rejoin the cluster", removedFromClusterText)
+	assert.NotContains(t, "the member has been permanently removed from the cluster", removedFromClusterText)
+	assert.Contains(t, "the member has been permanently removed from the cluster", etcdRemovedText)
 }
 
 // The watcher writes the tombstone only if a member list that is newer than the container start
@@ -74,15 +77,21 @@ func TestWatchEtcdMembership(t *testing.T) {
 
 	now := time.Now().Unix()
 
+	etcdError := `{"level":"warn","msg":"server error","error":"the member has been permanently removed from the cluster"}`
+
 	tests := []struct {
 		name          string
 		annotation    string
+		k3sLog        string
 		wantTombstone bool
 	}{
 		{name: "own member removed", annotation: fmt.Sprintf("%d s-0-aaaa,s-1-bbbb", now+100), wantTombstone: true},
 		{name: "own member listed", annotation: fmt.Sprintf("%d s-0-aaaa,s-2-cccc,s-1-bbbb", now+100)},
 		{name: "list older than the container", annotation: fmt.Sprintf("%d s-0-aaaa,s-1-bbbb", now-100)},
 		{name: "no list"},
+		{name: "etcd reports the removal", k3sLog: etcdError, wantTombstone: true},
+		{name: "etcd reports the removal, own member listed", annotation: fmt.Sprintf("%d s-2-cccc", now+100), k3sLog: etcdError, wantTombstone: true},
+		{name: "rejoin message of k3s is no signal", k3sLog: "tombstone file has been detected, removing ${datadir}/server/db to rejoin the cluster"},
 	}
 
 	for _, tt := range tests {
@@ -103,7 +112,10 @@ func TestWatchEtcdMembership(t *testing.T) {
 
 			require.NoError(t, os.WriteFile(filepath.Join(metaDir, "annotations"), []byte(annotations), 0o644))
 
-			f := strings.NewReplacer(k3sETCDDataDir, etcdDir, k3kMetaDir, metaDir, k3kRejoinFile, logFile).Replace(function)
+			k3sLogFile := filepath.Join(dir, "k3s.log")
+			require.NoError(t, os.WriteFile(k3sLogFile, []byte(tt.k3sLog+"\n"), 0o644))
+
+			f := strings.NewReplacer(k3sETCDDataDir, etcdDir, k3kMetaDir, metaDir, k3kRejoinFile, logFile, "/var/log/k3s.log", k3sLogFile).Replace(function)
 
 			// three passes of the loop without waiting
 			script := "info() { echo \"$@\"; }\nn=0\nsleep() { n=$((n+1)); [ $n -le 3 ]; }\n" + f + "watch_etcd_membership\n"

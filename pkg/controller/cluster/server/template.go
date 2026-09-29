@@ -112,7 +112,7 @@ watch_etcd_membership() {
 		info "etcd member $name is not in the cluster ($members): requesting a restart to rejoin"
 		touch {{.ETCD_DIR}}/tombstone
 		# own file: tee writes k3s.log at its own offset and would overwrite an appended line
-		echo "k3k: etcd member $name was removed, restart to rejoin the cluster" > {{.REJOIN_FILE}}
+		echo "k3k: etcd member $name was {{.REMOVED_TEXT}}, restart to join again" > {{.REJOIN_FILE}}
 
 		return
 	done

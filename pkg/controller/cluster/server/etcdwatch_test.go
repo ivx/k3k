@@ -53,6 +53,10 @@ func TestLivenessProbeReadsRejoinRequest(t *testing.T) {
 	cmd := strings.Join(probe.Exec.Command, " ")
 	assert.Contains(t, cmd, "/var/log/k3s.log")
 	assert.Contains(t, cmd, k3kRejoinFile)
+
+	// the message of etcd about its removal restarts the server, the message of the rejoin must not
+	assert.Contains(t, "This node has been removed from the cluster - please restart k3s to rejoin the cluster", removedFromClusterText)
+	assert.NotContains(t, "tombstone file has been detected, removing ${datadir}/server/db to rejoin the cluster", removedFromClusterText)
 }
 
 // The watcher writes the tombstone only if a member list that is newer than the container start
@@ -112,7 +116,7 @@ func TestWatchEtcdMembership(t *testing.T) {
 
 			if tt.wantTombstone {
 				assert.NoError(t, statErr, "tombstone must exist")
-				assert.Contains(t, string(logged), "rejoin the cluster", "the liveness probe must see the request")
+				assert.Contains(t, string(logged), removedFromClusterText, "the liveness probe must see the request")
 
 				return
 			}

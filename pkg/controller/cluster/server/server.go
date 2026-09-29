@@ -42,6 +42,14 @@ const (
 	// k3kRejoinFile is written by the startup script to request a restart through the
 	// liveness probe (see watch_etcd_membership).
 	k3kRejoinFile = "/var/log/k3k-rejoin"
+
+	// removedFromClusterText is part of the message of etcd when it sees the removal of its
+	// member ("This node has been removed from the cluster - please restart k3s to rejoin the
+	// cluster") and of the rejoin request of the startup script. The liveness probe restarts
+	// the server on it. It must not match the message of the rejoin itself ("tombstone file
+	// has been detected, removing ${datadir}/server/db to rejoin the cluster"): a restart in
+	// the middle of the join.
+	removedFromClusterText = "removed from the cluster"
 )
 
 // EtcdMembersAnnotation is set by the controller on a server pod that is not ready: the time
@@ -277,7 +285,7 @@ func (s *Server) podSpec(ctx context.Context, image, name string, persistent boo
 				Command: []string{
 					"sh",
 					"-c",
-					`grep -qs "rejoin the cluster" /var/log/k3s.log ` + k3kRejoinFile + ` && exit 1 || exit 0`,
+					`grep -qs "` + removedFromClusterText + `" /var/log/k3s.log ` + k3kRejoinFile + ` && exit 1 || exit 0`,
 				},
 			},
 		},
@@ -513,6 +521,7 @@ func (s *Server) setupStartCommand() (string, error) {
 		"ETCD_DIR":                k3sETCDDataDir,
 		"META_DIR":                k3kMetaDir,
 		"REJOIN_FILE":             k3kRejoinFile,
+		"REMOVED_TEXT":            removedFromClusterText,
 		"ETCD_MEMBERS_ANNOTATION": EtcdMembersAnnotation,
 		"INIT_CONFIG":             filepath.Join(k3sInitConfigDir, "config.yaml"),
 		"SERVER_CONFIG":           filepath.Join(k3sConfigDir, "config.yaml"),

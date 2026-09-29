@@ -238,3 +238,38 @@ func TestPodControllerRetriesAfterVirtualAPIError(t *testing.T) {
 	env.reconcile(t, "db-1-host")
 	assert.Equal(t, 1, forceDeletes)
 }
+
+// While the old host Pod terminates, each of its updates runs the reconcile
+// again. A newer virtual Pod with the same name must survive these runs.
+func TestPodControllerKeepsReplacementWhileHostPodTerminates(t *testing.T) {
+	env := newPodTestEnv(t, []runtime.Object{hostPodFor("db-2", "app", "uid-old")}, nil)
+
+	replacement := virtPodWithGrace("db-2", "app", "uid-new")
+	replacement.Finalizers = nil
+	require.NoError(t, env.virt.Create(context.Background(), replacement))
+
+	// the fake client ignores UID preconditions: enforce them like the API server
+	env.virt = interceptor.NewClient(env.virt.(ctrlruntimeclient.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c ctrlruntimeclient.WithWatch, obj ctrlruntimeclient.Object, opts ...ctrlruntimeclient.DeleteOption) error {
+			o := ctrlruntimeclient.DeleteOptions{}
+			o.ApplyOptions(opts)
+
+			if o.Preconditions != nil && o.Preconditions.UID != nil {
+				var cur corev1.Pod
+				if err := c.Get(ctx, ctrlruntimeclient.ObjectKeyFromObject(obj), &cur); err == nil && cur.UID != *o.Preconditions.UID {
+					return apierrors.NewConflict(corev1.Resource("pods"), obj.GetName(), nil)
+				}
+			}
+
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+
+	env.startHostDeletion(t, "db-2-host")
+	env.reconcile(t, "db-2-host")
+	env.reconcile(t, "db-2-host")
+
+	var cur corev1.Pod
+	require.NoError(t, env.virt.Get(context.Background(), types.NamespacedName{Name: "db-2", Namespace: "app"}, &cur))
+	assert.Equal(t, types.UID("uid-new"), cur.UID)
+}

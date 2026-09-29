@@ -115,7 +115,19 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 
 	log.V(1).Info("Deleting Virtual Pod", "name", virtName, "namespace", virtNamespace)
 
-	return reconcile.Result{}, ctrlruntimeclient.IgnoreNotFound(virtualClient.Delete(ctx, &virtPod))
+	// Delete only the incarnation of this host Pod: while an old host Pod terminates, each of its
+	// updates runs this reconcile, and a newer virtual Pod with the same name must survive it.
+	var opts []ctrlruntimeclient.DeleteOption
+	if uid != "" {
+		opts = append(opts, ctrlruntimeclient.Preconditions{UID: &uid})
+	}
+
+	err = virtualClient.Delete(ctx, &virtPod, opts...)
+	if apierrors.IsConflict(err) {
+		return reconcile.Result{}, nil
+	}
+
+	return reconcile.Result{}, ctrlruntimeclient.IgnoreNotFound(err)
 }
 
 // removeVirtualPod runs when a host Pod is gone. Its containers are stopped,

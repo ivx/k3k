@@ -39,6 +39,9 @@ const (
 	k3sLogDir        = "/var/log"
 	k3sVarRunDir     = "/var/run"
 	k3kMetaDir       = "/etc/k3k-meta"
+	// k3kRejoinFile is written by the startup script to request a restart through the
+	// liveness probe (see watch_etcd_membership).
+	k3kRejoinFile = "/var/log/k3k-rejoin"
 )
 
 // EtcdMembersAnnotation is set by the controller on a server pod that is not ready: the time
@@ -274,7 +277,7 @@ func (s *Server) podSpec(ctx context.Context, image, name string, persistent boo
 				Command: []string{
 					"sh",
 					"-c",
-					`grep -q "rejoin the cluster" /var/log/k3s.log && exit 1 || exit 0`,
+					`grep -qs "rejoin the cluster" /var/log/k3s.log ` + k3kRejoinFile + ` && exit 1 || exit 0`,
 				},
 			},
 		},
@@ -509,6 +512,7 @@ func (s *Server) setupStartCommand() (string, error) {
 	if err := tmplCmd.Execute(&output, map[string]string{
 		"ETCD_DIR":                k3sETCDDataDir,
 		"META_DIR":                k3kMetaDir,
+		"REJOIN_FILE":             k3kRejoinFile,
 		"ETCD_MEMBERS_ANNOTATION": EtcdMembersAnnotation,
 		"INIT_CONFIG":             filepath.Join(k3sInitConfigDir, "config.yaml"),
 		"SERVER_CONFIG":           filepath.Join(k3sConfigDir, "config.yaml"),

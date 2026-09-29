@@ -86,8 +86,8 @@ start_single_node() {
 # {{.ETCD_MEMBERS_ANNOTATION}} while this server is not ready. If a list that
 # was read after the start of this container does not contain the member name
 # of this server, the watcher writes the tombstone (as etcd does when it sees
-# its removal) and asks for a restart through the liveness probe. k3s then backs
-# up the data and joins as a new member.
+# its removal) and asks for a restart through the liveness probe ({{.REJOIN_FILE}}).
+# k3s then backs up the data and joins as a new member.
 watch_etcd_membership() {
 	started=$(date +%s)
 
@@ -111,7 +111,8 @@ watch_etcd_membership() {
 
 		info "etcd member $name is not in the cluster ($members): requesting a restart to rejoin"
 		touch {{.ETCD_DIR}}/tombstone
-		echo "k3k: etcd member $name was removed, restart to rejoin the cluster" >> /var/log/k3s.log
+		# own file: tee writes k3s.log at its own offset and would overwrite an appended line
+		echo "k3k: etcd member $name was removed, restart to rejoin the cluster" > {{.REJOIN_FILE}}
 
 		return
 	done
@@ -119,6 +120,9 @@ watch_etcd_membership() {
 
 start_ha_node() {
 	info "Starting pod $POD_NAME in HA node setup"
+
+	# a rejoin request of the previous container is done with this start
+	rm -f {{.REJOIN_FILE}}
 
 	if [ ${POD_NAME: -1} == 0 ] && [ ! -d "{{.ETCD_DIR}}" ]; then
 		info "Adding pod IP file."

@@ -41,6 +41,18 @@ func TestStartCommandSyntax(t *testing.T) {
 	// the liveness probe reads /var/log/k3s.log: every k3s server must write to it
 	assert.NotContains(t, cmd, "k3s.info")
 	assert.Contains(t, cmd, "watch_etcd_membership &")
+	assert.Contains(t, cmd, "rm -f "+k3kRejoinFile)
+}
+
+// The liveness probe restarts the server on a rejoin request of the startup script and on the
+// removal message of etcd.
+func TestLivenessProbeReadsRejoinRequest(t *testing.T) {
+	s := New(&v1beta1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"}}, nil, "token", "img", "", nil)
+	probe := s.podSpec(t.Context(), "img", "k3k-c-server", false, "").Containers[0].LivenessProbe
+
+	cmd := strings.Join(probe.Exec.Command, " ")
+	assert.Contains(t, cmd, "/var/log/k3s.log")
+	assert.Contains(t, cmd, k3kRejoinFile)
 }
 
 // The watcher writes the tombstone only if a member list that is newer than the container start
@@ -74,7 +86,7 @@ func TestWatchEtcdMembership(t *testing.T) {
 			dir := t.TempDir()
 			etcdDir := filepath.Join(dir, "etcd")
 			metaDir := filepath.Join(dir, "meta")
-			logFile := filepath.Join(dir, "k3s.log")
+			logFile := filepath.Join(dir, "k3k-rejoin")
 
 			require.NoError(t, os.MkdirAll(etcdDir, 0o755))
 			require.NoError(t, os.MkdirAll(metaDir, 0o755))
@@ -87,7 +99,7 @@ func TestWatchEtcdMembership(t *testing.T) {
 
 			require.NoError(t, os.WriteFile(filepath.Join(metaDir, "annotations"), []byte(annotations), 0o644))
 
-			f := strings.NewReplacer(k3sETCDDataDir, etcdDir, k3kMetaDir, metaDir, "/var/log/k3s.log", logFile).Replace(function)
+			f := strings.NewReplacer(k3sETCDDataDir, etcdDir, k3kMetaDir, metaDir, k3kRejoinFile, logFile).Replace(function)
 
 			// three passes of the loop without waiting
 			script := "info() { echo \"$@\"; }\nn=0\nsleep() { n=$((n+1)); [ $n -le 3 ]; }\n" + f + "watch_etcd_membership\n"

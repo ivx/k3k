@@ -410,6 +410,18 @@ func (p *Provider) createPod(ctx context.Context, pod *corev1.Pod) error {
 		return err
 	}
 
+	// A host Pod with this name can still exist from an older incarnation of the Pod. Check it
+	// before the host Pod is built: building it requests a service account token.
+	hostPodName := p.Translator.TranslateName(virtualPod.Namespace, virtualPod.Name)
+
+	existing, err := p.Host.CoreClient.Pods(p.ClusterNamespace).Get(ctx, hostPodName, metav1.GetOptions{})
+	if err == nil {
+		return p.existingHostPod(ctx, logger, existing, &virtualPod)
+	} else if !apierrors.IsNotFound(err) {
+		logger.Error(err, "Error getting pod from host cluster")
+		return err
+	}
+
 	// Copy the virtual Pod and use it as a baseline for the hostPod
 	// do some basic translation and clearing some values (UID, ResourceVersion, ...)
 
@@ -500,13 +512,9 @@ func (p *Provider) createPod(ctx context.Context, pod *corev1.Pod) error {
 		hardenCoreDNS(hostPod)
 	}
 
+	// AlreadyExists (a host Pod made after the check above): the retry runs the check again
 	if err := p.Host.Client.Create(ctx, hostPod); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return p.existingHostPod(ctx, logger, hostPod.Name, &virtualPod, err)
-		}
-
 		logger.Error(err, "Error creating pod on host cluster")
-
 		return err
 	}
 
@@ -515,22 +523,13 @@ func (p *Provider) createPod(ctx context.Context, pod *corev1.Pod) error {
 	return nil
 }
 
-// existingHostPod handles a create that failed because a host Pod with the same name exists.
+// existingHostPod handles a host Pod that already has the name of the host Pod for virtualPod.
 // If it is the copy of virtualPod (an earlier create that virtual-kubelet did not see), the
 // create is done. If it is the copy of an older incarnation of the Pod, its virtual Pod does not
 // exist anymore: the copy is deleted (if it does not terminate yet) and an error is returned.
 // virtual-kubelet then sets the virtual Pod to Pending/ProviderFailed, and the pod retry
 // controller starts a new attempt until the old copy is gone.
-func (p *Provider) existingHostPod(ctx context.Context, logger logr.Logger, hostPodName string, virtualPod *corev1.Pod, createErr error) error {
-	existing, err := p.Host.CoreClient.Pods(p.ClusterNamespace).Get(ctx, hostPodName, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return createErr
-		}
-
-		return err
-	}
-
+func (p *Provider) existingHostPod(ctx context.Context, logger logr.Logger, existing, virtualPod *corev1.Pod) error {
 	uid := existing.Annotations[translate.VirtualUIDAnnotation]
 	if uid == string(virtualPod.UID) {
 		logger.Info("Pod already exists on host cluster")
@@ -538,14 +537,13 @@ func (p *Provider) existingHostPod(ctx context.Context, logger logr.Logger, host
 	}
 
 	if uid == "" {
-		logger.Error(createErr, "Error creating pod on host cluster")
-		return createErr
+		return fmt.Errorf("host pod %s already exists", existing.Name)
 	}
 
 	if existing.DeletionTimestamp == nil {
 		hostUID := existing.UID
 
-		err := p.Host.CoreClient.Pods(p.ClusterNamespace).Delete(ctx, hostPodName, metav1.DeleteOptions{
+		err := p.Host.CoreClient.Pods(p.ClusterNamespace).Delete(ctx, existing.Name, metav1.DeleteOptions{
 			Preconditions: &metav1.Preconditions{UID: &hostUID},
 		})
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -556,7 +554,7 @@ func (p *Provider) existingHostPod(ctx context.Context, logger logr.Logger, host
 		logger.Info("Deleted host pod of an older pod incarnation", "hostPodUID", hostUID, "hostPodVirtualUID", uid)
 	}
 
-	return fmt.Errorf("host pod %s of an older incarnation (virtual UID %s) still exists: %w", hostPodName, uid, createErr)
+	return fmt.Errorf("host pod %s of an older pod incarnation (virtual UID %s) still exists", existing.Name, uid)
 }
 
 // configureScheduling sets the scheduling constraints of the host Pod. The NodeName of the

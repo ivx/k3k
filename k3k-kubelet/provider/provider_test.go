@@ -981,8 +981,6 @@ func TestGetPodStatus_OlderIncarnation(t *testing.T) {
 
 func TestExistingHostPod(t *testing.T) {
 	n := newNamereuse()
-	createErr := apierrors.NewAlreadyExists(corev1.Resource("pods"), n.hostPodName)
-
 	terminating := n.hostPod("virt-uid-1")
 	terminating.DeletionTimestamp = &metav1.Time{}
 
@@ -996,17 +994,11 @@ func TestExistingHostPod(t *testing.T) {
 		{name: "running copy of an older incarnation is deleted", hostPod: n.hostPod("virt-uid-1"), wantErr: true, wantDeleted: true},
 		{name: "terminating copy of an older incarnation is kept", hostPod: terminating, wantErr: true},
 		{name: "copy of an older k3k-kubelet is kept", hostPod: n.hostPod(""), wantErr: true},
-		{name: "copy gone meanwhile: the retry creates the pod", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var clientset *k8sfake.Clientset
-			if tt.hostPod != nil {
-				clientset = k8sfake.NewClientset(tt.hostPod)
-			} else {
-				clientset = k8sfake.NewClientset()
-			}
+			clientset := k8sfake.NewClientset(tt.hostPod)
 
 			var deletes []k8stesting.DeleteActionImpl
 
@@ -1021,7 +1013,7 @@ func TestExistingHostPod(t *testing.T) {
 				logger:           logr.Discard(),
 			}
 
-			err := p.existingHostPod(context.Background(), logr.Discard(), n.hostPodName, n.virtualPod("virt-uid-2"), createErr)
+			err := p.existingHostPod(context.Background(), logr.Discard(), tt.hostPod, n.virtualPod("virt-uid-2"))
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
